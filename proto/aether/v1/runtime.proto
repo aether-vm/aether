@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package aether.v1;
+
+// Protocol negotiation & health service (mandatory before issuing stateful RPCs
+// so satellite tools like aether-mcp can detect version skew cleanly).
+service SystemService {
+  rpc NegotiateVersion(NegotiateVersionRequest) returns (NegotiateVersionResponse);
+}
+
+message NegotiateVersionRequest {
+  string client_name = 1;
+  string client_version = 2;
+  uint32 supported_api_major = 3;
+}
+
+message NegotiateVersionResponse {
+  string daemon_version = 1;
+  uint32 api_major = 2;
+  uint32 api_minor = 3;
+  uint64 daemon_epoch = 4;
+  repeated string enabled_drivers = 5; // e.g., ["namespace", "firecracker"]
+}

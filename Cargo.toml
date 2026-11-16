@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aos-types",
+    "crates/aos-store",
+    "crates/aos-meta",
+    "crates/aos-sandbox",
+    "crates/aos-gw",
+    "crates/aos-guest",
+    "crates/agentd",
+    "crates/aos-cli",
+    "benchmarks/phase0-harness",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+repository = "https://github.com/aether-vm/aether"
+homepage = "https://github.com/aether-vm"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+redb = "2"
+blake3 = "1"
+nix = { version = "0.29", features = ["fs", "mount", "sched", "process", "signal", "ioctl"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
