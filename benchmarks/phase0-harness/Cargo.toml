@@ -1,0 +1,27 @@
+[package]
+name = "phase0-harness"
+description = "Aether Phase 0 falsification suite (Linux only): F0-1..F0-8 kernel-primitive experiments."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "phase0_harness"
+path = "src/lib.rs"
+
+[[bin]]
+name = "phase0-harness"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+nix = { workspace = true, features = ["user", "fs", "ioctl", "mount"] }
+redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+aos-types = { path = "../../crates/aos-types" }

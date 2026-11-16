@@ -1,0 +1,228 @@
+{
+  "env": {
+    "argv": [
+      "./target/release/phase0-harness",
+      "f0-1-btrfs-snap",
+      "--subvols",
+      "500",
+      "--baseline-secs",
+      "3"
+    ],
+    "authority": "AdvisoryWsl2",
+    "authority_note": "WSL2 = nested virtualisation + loop devices on ext4-on-VHDX + host page cache beneath. Valid for functional/crash-semantics conclusions; latency/throughput numbers MUST NOT be published as baselines (docs/PHASE0_FALSIFICATION.md section 1).",
+    "boot_id": "463b5974-ab7f-4309-843d-6f0dc4d057de",
+    "cached_mib_at_start": 856,
+    "collected_at": "2026-11-16T08:59:52Z",
+    "cpu_model": "11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz",
+    "dirty_kib_at_start": 19588,
+    "euid": 0,
+    "host_declared": "Surface Pro 8, i5-1135G7, 16 GiB RAM (as declared in docs/PHASE0_FALSIFICATION.md section 1.1; not verifiable from inside WSL2)",
+    "is_wsl2": true,
+    "kernel_release": "6.6.87.2-microsoft-standard-WSL2",
+    "kernel_version_line": "Linux version 6.6.87.2-microsoft-standard-WSL2 (root@439a258ad544) (gcc (GCC) 11.2.0, GNU ld (GNU Binutils) 2.37) #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025",
+    "kvm_present": true,
+    "logical_cpus": 8,
+    "mem_available_mib": 7437,
+    "mem_total_mib": 7942,
+    "pool_root": "/var/lib/aether/phase0",
+    "pool_root_fs": "ext2/3/4",
+    "power_state": "BAT1: status=Discharging online=unknown; AC1: status=unknown online=1",
+    "tools": [
+      [
+        "rustc",
+        "unavailable"
+      ],
+      [
+        "btrfs-progs",
+        "btrfs-progs v5.16.2"
+      ],
+      [
+        "xfsprogs (mkfs.xfs)",
+        "mkfs.xfs version 5.13.0"
+      ],
+      [
+        "e2fsprogs (mkfs.ext4)",
+        "mke2fs 1.46.5 (30-Dec-2021)"
+      ],
+      [
+        "git",
+        "git version 2.34.1"
+      ],
+      [
+        "losetup",
+        "losetup from util-linux 2.37.2"
+      ],
+      [
+        "firecracker",
+        "Firecracker v1.10.1"
+      ]
+    ]
+  },
+  "experiment": "F0-1",
+  "result": {
+    "background_load_writes": 84608,
+    "btrfs_fs_info": {
+      "clone_alignment": 4096,
+      "fsid": "ed3f1bd36e1844d28d37f7988b2a6a8e",
+      "generation": 0,
+      "nodesize": 16384,
+      "num_devices": 1,
+      "sectorsize": 4096
+    },
+    "cleaner_drain_s": 13.019251872,
+    "create_total_s": 16.511551584,
+    "destroy_api": "V2",
+    "destroy_total_s": 0.007841642,
+    "free_mib": {
+      "after_create": 2413,
+      "after_drain": 2357,
+      "before": 2499
+    },
+    "gate": {
+      "pivot_triggered": true,
+      "threshold_ms": 50,
+      "worst_pool_p99_ms": 55.170721
+    },
+    "params": {
+      "baseline_secs": 3,
+      "commit_interval_ms": 2,
+      "load_mib": 256,
+      "pool_mib": 3072,
+      "seed": 2927493121,
+      "subvols": 500
+    },
+    "pool": {
+      "direct_io": true,
+      "kind": "btrfs",
+      "qgroup_show_output": "ERROR: can't list qgroups: quotas not enabled",
+      "qgroups_disabled": true
+    },
+    "redb_by_phase": {
+      "baseline": {
+        "host_commits_over_50ms": 0,
+        "pool_commits_over_50ms": 0,
+        "redb_host": {
+          "max_us": 18046.891,
+          "mean_us": 1996.0382359396444,
+          "min_us": 1074.5310000000002,
+          "n": 729,
+          "p50_us": 1570.174,
+          "p90_us": 2850.868,
+          "p99_us": 8951.875
+        },
+        "redb_pool": {
+          "max_us": 32924.148,
+          "mean_us": 15357.04825294118,
+          "min_us": 10380.786,
+          "n": 170,
+          "p50_us": 14188.074999999999,
+          "p90_us": 20410.748,
+          "p99_us": 28625.344
+        }
+      },
+      "create": {
+        "host_commits_over_50ms": 1,
+        "pool_commits_over_50ms": 23,
+        "redb_host": {
+          "max_us": 1479939.886,
+          "mean_us": 2911.7653740458063,
+          "min_us": 1047.904,
+          "n": 3275,
+          "p50_us": 1849.252,
+          "p90_us": 3964.7349999999997,
+          "p99_us": 10633.894
+        },
+        "redb_pool": {
+          "max_us": 1519583.631,
+          "mean_us": 29742.912424710423,
+          "min_us": 8015.161,
+          "n": 518,
+          "p50_us": 23460.244000000002,
+          "p90_us": 44097.301999999996,
+          "p99_us": 55170.721
+        }
+      },
+      "destroy": {
+        "host_commits_over_50ms": 0,
+        "pool_commits_over_50ms": 0,
+        "redb_host": {
+          "max_us": 1870.5620000000001,
+          "mean_us": 1848.6725000000001,
+          "min_us": 1826.783,
+          "n": 2,
+          "p50_us": 1826.783,
+          "p90_us": 1870.5620000000001,
+          "p99_us": 1870.5620000000001
+        },
+        "redb_pool": {
+          "max_us": 12384.378999999999,
+          "mean_us": 12384.378999999999,
+          "min_us": 12384.378999999999,
+          "n": 1,
+          "p50_us": 12384.378999999999,
+          "p90_us": 12384.378999999999,
+          "p99_us": 12384.378999999999
+        }
+      },
+      "settle": {
+        "host_commits_over_50ms": 17,
+        "pool_commits_over_50ms": 5,
+        "redb_host": {
+          "max_us": 724209.4519999999,
+          "mean_us": 3075.5013628613783,
+          "min_us": 1008.2820000000002,
+          "n": 2698,
+          "p50_us": 1686.444,
+          "p90_us": 2892.5930000000003,
+          "p99_us": 9312.903
+        },
+        "redb_pool": {
+          "max_us": 1400788.118,
+          "mean_us": 20136.82838034867,
+          "min_us": 7219.582,
+          "n": 631,
+          "p50_us": 13049.099,
+          "p90_us": 23602.307,
+          "p99_us": 46569.33500000001
+        }
+      }
+    },
+    "snap_create": {
+      "max_us": 1511544.1060000001,
+      "mean_us": 33019.14489400002,
+      "min_us": 6970.5380000000005,
+      "n": 500,
+      "p50_us": 25853.476,
+      "p90_us": 48464.609,
+      "p99_us": 67649.364
+    },
+    "snap_create_readonly": {
+      "max_us": 1511544.1060000001,
+      "mean_us": 36200.78077999999,
+      "min_us": 8893.812,
+      "n": 250,
+      "p50_us": 25777.445,
+      "p90_us": 49619.503000000004,
+      "p99_us": 70848.476
+    },
+    "snap_create_writable": {
+      "max_us": 75168.201,
+      "mean_us": 29837.509007999997,
+      "min_us": 6970.5380000000005,
+      "n": 250,
+      "p50_us": 25956.105,
+      "p90_us": 48138.061,
+      "p99_us": 61138.592
+    },
+    "snap_destroy": {
+      "max_us": 117.53699999999999,
+      "mean_us": 15.484889999999991,
+      "min_us": 9.158,
+      "n": 500,
+      "p50_us": 13.59,
+      "p90_us": 19.565,
+      "p99_us": 41.699999999999996
+    },
+    "verdict": "**PIVOT TRIGGERED (advisory, WSL2)**: same-pool redb commit P99 reached 55.2 ms (> 50 ms) during snapshot churn -> `meta/aether.redb` must live outside the Btrfs data pool."
+  }
+}

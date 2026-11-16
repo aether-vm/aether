@@ -1,0 +1,805 @@
+{
+  "env": {
+    "argv": [
+      "./target/release/phase0-harness",
+      "f0-2-ficlone-matrix",
+      "--extents",
+      "1000,10000,50000",
+      "--dirty-mib",
+      "0,128",
+      "--reps",
+      "3"
+    ],
+    "authority": "AdvisoryWsl2",
+    "authority_note": "WSL2 = nested virtualisation + loop devices on ext4-on-VHDX + host page cache beneath. Valid for functional/crash-semantics conclusions; latency/throughput numbers MUST NOT be published as baselines (docs/PHASE0_FALSIFICATION.md section 1).",
+    "boot_id": "463b5974-ab7f-4309-843d-6f0dc4d057de",
+    "cached_mib_at_start": 860,
+    "collected_at": "2026-11-16T09:00:27Z",
+    "cpu_model": "11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz",
+    "dirty_kib_at_start": 248,
+    "euid": 0,
+    "host_declared": "Surface Pro 8, i5-1135G7, 16 GiB RAM (as declared in docs/PHASE0_FALSIFICATION.md section 1.1; not verifiable from inside WSL2)",
+    "is_wsl2": true,
+    "kernel_release": "6.6.87.2-microsoft-standard-WSL2",
+    "kernel_version_line": "Linux version 6.6.87.2-microsoft-standard-WSL2 (root@439a258ad544) (gcc (GCC) 11.2.0, GNU ld (GNU Binutils) 2.37) #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025",
+    "kvm_present": true,
+    "logical_cpus": 8,
+    "mem_available_mib": 7449,
+    "mem_total_mib": 7942,
+    "pool_root": "/var/lib/aether/phase0",
+    "pool_root_fs": "ext2/3/4",
+    "power_state": "BAT1: status=Discharging online=unknown; AC1: status=unknown online=1",
+    "tools": [
+      [
+        "rustc",
+        "unavailable"
+      ],
+      [
+        "btrfs-progs",
+        "btrfs-progs v5.16.2"
+      ],
+      [
+        "xfsprogs (mkfs.xfs)",
+        "mkfs.xfs version 5.13.0"
+      ],
+      [
+        "e2fsprogs (mkfs.ext4)",
+        "mke2fs 1.46.5 (30-Dec-2021)"
+      ],
+      [
+        "git",
+        "git version 2.34.1"
+      ],
+      [
+        "losetup",
+        "losetup from util-linux 2.37.2"
+      ],
+      [
+        "firecracker",
+        "Firecracker v1.10.1"
+      ]
+    ]
+  },
+  "experiment": "F0-2",
+  "result": {
+    "cells": [
+      {
+        "backend": "btrfs-cow",
+        "clone": {
+          "max_us": 10196.251999999999,
+          "mean_us": 8812.228000000001,
+          "min_us": 8082.282999999999,
+          "n": 3,
+          "p50_us": 8158.149,
+          "p90_us": 10196.251999999999,
+          "p99_us": 10196.251999999999
+        },
+        "dirty_kib_before_clone_max": 700,
+        "dirty_mib": 0,
+        "error": null,
+        "extents_exact_after": 1000,
+        "extents_exact_before": 1000,
+        "extents_fiemap_before": 1000,
+        "extents_requested": 1000,
+        "fsync": {
+          "max_us": 43837.647,
+          "mean_us": 37301.598666666665,
+          "min_us": 32072.61,
+          "n": 3,
+          "p50_us": 35994.539,
+          "p90_us": 43837.647,
+          "p99_us": 43837.647
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 54033.899000000005,
+          "mean_us": 46113.82666666667,
+          "min_us": 40230.759,
+          "n": 3,
+          "p50_us": 44076.822,
+          "p90_us": 54033.899000000005,
+          "p99_us": 54033.899000000005
+        }
+      },
+      {
+        "backend": "btrfs-cow",
+        "clone": {
+          "max_us": 125609.97199999998,
+          "mean_us": 105699.43999999999,
+          "min_us": 85873.94,
+          "n": 3,
+          "p50_us": 105614.40800000001,
+          "p90_us": 125609.97199999998,
+          "p99_us": 125609.97199999998
+        },
+        "dirty_kib_before_clone_max": 131768,
+        "dirty_mib": 128,
+        "error": null,
+        "extents_exact_after": 1001,
+        "extents_exact_before": 1000,
+        "extents_fiemap_before": 1000,
+        "extents_requested": 1000,
+        "fsync": {
+          "max_us": 15131.557999999999,
+          "mean_us": 14124.278666666667,
+          "min_us": 13109.960000000001,
+          "n": 3,
+          "p50_us": 14131.318000000001,
+          "p90_us": 15131.557999999999,
+          "p99_us": 15131.557999999999
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 140741.53,
+          "mean_us": 119823.71866666665,
+          "min_us": 98983.9,
+          "n": 3,
+          "p50_us": 119745.726,
+          "p90_us": 140741.53,
+          "p99_us": 140741.53
+        }
+      },
+      {
+        "backend": "btrfs-cow",
+        "clone": {
+          "max_us": 80598.735,
+          "mean_us": 53025.94966666666,
+          "min_us": 35671.842000000004,
+          "n": 3,
+          "p50_us": 42807.272,
+          "p90_us": 80598.735,
+          "p99_us": 80598.735
+        },
+        "dirty_kib_before_clone_max": 1680,
+        "dirty_mib": 0,
+        "error": null,
+        "extents_exact_after": 10000,
+        "extents_exact_before": 10000,
+        "extents_fiemap_before": 10000,
+        "extents_requested": 10000,
+        "fsync": {
+          "max_us": 61528.76,
+          "mean_us": 49807.049333333336,
+          "min_us": 36105.603,
+          "n": 3,
+          "p50_us": 51786.785,
+          "p90_us": 61528.76,
+          "p99_us": 61528.76
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 142127.495,
+          "mean_us": 102832.999,
+          "min_us": 78912.875,
+          "n": 3,
+          "p50_us": 87458.627,
+          "p90_us": 142127.495,
+          "p99_us": 142127.495
+        }
+      },
+      {
+        "backend": "btrfs-cow",
+        "clone": {
+          "max_us": 218756.412,
+          "mean_us": 168093.53066666666,
+          "min_us": 136697.199,
+          "n": 3,
+          "p50_us": 148826.981,
+          "p90_us": 218756.412,
+          "p99_us": 218756.412
+        },
+        "dirty_kib_before_clone_max": 132556,
+        "dirty_mib": 128,
+        "error": null,
+        "extents_exact_after": 10001,
+        "extents_exact_before": 10000,
+        "extents_fiemap_before": 10000,
+        "extents_requested": 10000,
+        "fsync": {
+          "max_us": 93432.897,
+          "mean_us": 63471.668999999994,
+          "min_us": 42305.087,
+          "n": 3,
+          "p50_us": 54677.023,
+          "p90_us": 93432.897,
+          "p99_us": 93432.897
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 312189.309,
+          "mean_us": 231565.19966666668,
+          "min_us": 191132.068,
+          "n": 3,
+          "p50_us": 191374.222,
+          "p90_us": 312189.309,
+          "p99_us": 312189.309
+        }
+      },
+      {
+        "backend": "btrfs-cow",
+        "clone": {
+          "max_us": 182520.592,
+          "mean_us": 177751.6793333333,
+          "min_us": 171809.06000000003,
+          "n": 3,
+          "p50_us": 178925.386,
+          "p90_us": 182520.592,
+          "p99_us": 182520.592
+        },
+        "dirty_kib_before_clone_max": 11572,
+        "dirty_mib": 0,
+        "error": null,
+        "extents_exact_after": 50000,
+        "extents_exact_before": 50000,
+        "extents_fiemap_before": 50000,
+        "extents_requested": 50000,
+        "fsync": {
+          "max_us": 256702.121,
+          "mean_us": 218084.70133333336,
+          "min_us": 175004.73799999998,
+          "n": 3,
+          "p50_us": 222547.245,
+          "p90_us": 256702.121,
+          "p99_us": 256702.121
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 428511.18100000004,
+          "mean_us": 395836.38066666666,
+          "min_us": 353930.124,
+          "n": 3,
+          "p50_us": 405067.837,
+          "p90_us": 428511.18100000004,
+          "p99_us": 428511.18100000004
+        }
+      },
+      {
+        "backend": "btrfs-cow",
+        "clone": {
+          "max_us": 314849.592,
+          "mean_us": 285100.7183333333,
+          "min_us": 265477.126,
+          "n": 3,
+          "p50_us": 274975.437,
+          "p90_us": 314849.592,
+          "p99_us": 314849.592
+        },
+        "dirty_kib_before_clone_max": 142684,
+        "dirty_mib": 128,
+        "error": null,
+        "extents_exact_after": 50001,
+        "extents_exact_before": 50000,
+        "extents_fiemap_before": 50000,
+        "extents_requested": 50000,
+        "fsync": {
+          "max_us": 202089.60700000002,
+          "mean_us": 186757.53066666666,
+          "min_us": 175367.293,
+          "n": 3,
+          "p50_us": 182815.692,
+          "p90_us": 202089.60700000002,
+          "p99_us": 202089.60700000002
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 490216.885,
+          "mean_us": 471858.249,
+          "min_us": 448292.81799999997,
+          "n": 3,
+          "p50_us": 477065.044,
+          "p90_us": 490216.885,
+          "p99_us": 490216.885
+        }
+      },
+      {
+        "backend": "btrfs-nocow",
+        "clone": {
+          "max_us": 3029.623,
+          "mean_us": 2931.758,
+          "min_us": 2876.764,
+          "n": 3,
+          "p50_us": 2888.887,
+          "p90_us": 3029.623,
+          "p99_us": 3029.623
+        },
+        "dirty_kib_before_clone_max": 580,
+        "dirty_mib": 0,
+        "error": null,
+        "extents_exact_after": 1000,
+        "extents_exact_before": 1000,
+        "extents_fiemap_before": 1000,
+        "extents_requested": 1000,
+        "fsync": {
+          "max_us": 18022.352,
+          "mean_us": 13140.687666666667,
+          "min_us": 10475.98,
+          "n": 3,
+          "p50_us": 10923.731000000002,
+          "p90_us": 18022.352,
+          "p99_us": 18022.352
+        },
+        "nocow_flag": true,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 20899.115999999998,
+          "mean_us": 16072.445666666667,
+          "min_us": 13505.603,
+          "n": 3,
+          "p50_us": 13812.618,
+          "p90_us": 20899.115999999998,
+          "p99_us": 20899.115999999998
+        }
+      },
+      {
+        "backend": "btrfs-nocow",
+        "clone": {
+          "max_us": 118308.01000000001,
+          "mean_us": 97122.11700000001,
+          "min_us": 84079.293,
+          "n": 3,
+          "p50_us": 88979.04800000001,
+          "p90_us": 118308.01000000001,
+          "p99_us": 118308.01000000001
+        },
+        "dirty_kib_before_clone_max": 131508,
+        "dirty_mib": 128,
+        "error": null,
+        "extents_exact_after": 1001,
+        "extents_exact_before": 1000,
+        "extents_fiemap_before": 1000,
+        "extents_requested": 1000,
+        "fsync": {
+          "max_us": 22061.175,
+          "mean_us": 17175.602,
+          "min_us": 14647.587,
+          "n": 3,
+          "p50_us": 14818.044,
+          "p90_us": 22061.175,
+          "p99_us": 22061.175
+        },
+        "nocow_flag": true,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 140369.185,
+          "mean_us": 114297.719,
+          "min_us": 98726.88,
+          "n": 3,
+          "p50_us": 103797.09199999999,
+          "p90_us": 140369.185,
+          "p99_us": 140369.185
+        }
+      },
+      {
+        "backend": "btrfs-nocow",
+        "clone": {
+          "max_us": 64280.833999999995,
+          "mean_us": 42111.903,
+          "min_us": 30574.383,
+          "n": 3,
+          "p50_us": 31480.492,
+          "p90_us": 64280.833999999995,
+          "p99_us": 64280.833999999995
+        },
+        "dirty_kib_before_clone_max": 2560,
+        "dirty_mib": 0,
+        "error": null,
+        "extents_exact_after": 10000,
+        "extents_exact_before": 10000,
+        "extents_fiemap_before": 10000,
+        "extents_requested": 10000,
+        "fsync": {
+          "max_us": 66766.40000000001,
+          "mean_us": 53301.58866666667,
+          "min_us": 37711.489,
+          "n": 3,
+          "p50_us": 55426.877,
+          "p90_us": 66766.40000000001,
+          "p99_us": 66766.40000000001
+        },
+        "nocow_flag": true,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 131047.23400000001,
+          "mean_us": 95413.49166666665,
+          "min_us": 68285.872,
+          "n": 3,
+          "p50_us": 86907.36899999999,
+          "p90_us": 131047.23400000001,
+          "p99_us": 131047.23400000001
+        }
+      },
+      {
+        "backend": "btrfs-nocow",
+        "clone": {
+          "max_us": 186544.823,
+          "mean_us": 142012.84600000002,
+          "min_us": 117963.145,
+          "n": 3,
+          "p50_us": 121530.57,
+          "p90_us": 186544.823,
+          "p99_us": 186544.823
+        },
+        "dirty_kib_before_clone_max": 133480,
+        "dirty_mib": 128,
+        "error": null,
+        "extents_exact_after": 10001,
+        "extents_exact_before": 10000,
+        "extents_fiemap_before": 10000,
+        "extents_requested": 10000,
+        "fsync": {
+          "max_us": 73301.606,
+          "mean_us": 51283.746666666666,
+          "min_us": 37669.965,
+          "n": 3,
+          "p50_us": 42879.669,
+          "p90_us": 73301.606,
+          "p99_us": 73301.606
+        },
+        "nocow_flag": true,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 259846.429,
+          "mean_us": 193296.59266666663,
+          "min_us": 155633.11,
+          "n": 3,
+          "p50_us": 164410.239,
+          "p90_us": 259846.429,
+          "p99_us": 259846.429
+        }
+      },
+      {
+        "backend": "btrfs-nocow",
+        "clone": {
+          "max_us": 194945.25400000002,
+          "mean_us": 177451.91633333336,
+          "min_us": 165096.921,
+          "n": 3,
+          "p50_us": 172313.574,
+          "p90_us": 194945.25400000002,
+          "p99_us": 194945.25400000002
+        },
+        "dirty_kib_before_clone_max": 10400,
+        "dirty_mib": 0,
+        "error": null,
+        "extents_exact_after": 50000,
+        "extents_exact_before": 50000,
+        "extents_fiemap_before": 50000,
+        "extents_requested": 50000,
+        "fsync": {
+          "max_us": 279280.783,
+          "mean_us": 235261.41166666665,
+          "min_us": 157382.947,
+          "n": 3,
+          "p50_us": 269120.505,
+          "p90_us": 279280.783,
+          "p99_us": 279280.783
+        },
+        "nocow_flag": true,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 451594.357,
+          "mean_us": 412713.32800000004,
+          "min_us": 352328.201,
+          "n": 3,
+          "p50_us": 434217.42600000004,
+          "p90_us": 451594.357,
+          "p99_us": 451594.357
+        }
+      },
+      {
+        "backend": "btrfs-nocow",
+        "clone": {
+          "max_us": 301814.14400000003,
+          "mean_us": 290737.98500000004,
+          "min_us": 280547.472,
+          "n": 3,
+          "p50_us": 289852.33900000004,
+          "p90_us": 301814.14400000003,
+          "p99_us": 301814.14400000003
+        },
+        "dirty_kib_before_clone_max": 141104,
+        "dirty_mib": 128,
+        "error": null,
+        "extents_exact_after": 50001,
+        "extents_exact_before": 50000,
+        "extents_fiemap_before": 50000,
+        "extents_requested": 50000,
+        "fsync": {
+          "max_us": 238533.719,
+          "mean_us": 223842.961,
+          "min_us": 214363.609,
+          "n": 3,
+          "p50_us": 218631.555,
+          "p90_us": 238533.719,
+          "p99_us": 238533.719
+        },
+        "nocow_flag": true,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 519081.19100000005,
+          "mean_us": 514580.94600000005,
+          "min_us": 508483.89400000003,
+          "n": 3,
+          "p50_us": 516177.753,
+          "p90_us": 519081.19100000005,
+          "p99_us": 519081.19100000005
+        }
+      },
+      {
+        "backend": "xfs-reflink",
+        "clone": {
+          "max_us": 12802.216999999999,
+          "mean_us": 9091.17,
+          "min_us": 6544.1359999999995,
+          "n": 3,
+          "p50_us": 7927.157000000001,
+          "p90_us": 12802.216999999999,
+          "p99_us": 12802.216999999999
+        },
+        "dirty_kib_before_clone_max": 380,
+        "dirty_mib": 0,
+        "error": null,
+        "extents_exact_after": 1000,
+        "extents_exact_before": 1000,
+        "extents_fiemap_before": 1000,
+        "extents_requested": 1000,
+        "fsync": {
+          "max_us": 13879.21,
+          "mean_us": 8241.680333333332,
+          "min_us": 4532.696999999999,
+          "n": 3,
+          "p50_us": 6313.134,
+          "p90_us": 13879.21,
+          "p99_us": 13879.21
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 26681.427,
+          "mean_us": 17332.850333333332,
+          "min_us": 12459.854,
+          "n": 3,
+          "p50_us": 12857.27,
+          "p90_us": 26681.427,
+          "p99_us": 26681.427
+        }
+      },
+      {
+        "backend": "xfs-reflink",
+        "clone": {
+          "max_us": 113106.46100000001,
+          "mean_us": 104299.94566666667,
+          "min_us": 93580.83899999999,
+          "n": 3,
+          "p50_us": 106212.537,
+          "p90_us": 113106.46100000001,
+          "p99_us": 113106.46100000001
+        },
+        "dirty_kib_before_clone_max": 131396,
+        "dirty_mib": 128,
+        "error": null,
+        "extents_exact_after": 1002,
+        "extents_exact_before": 1000,
+        "extents_fiemap_before": 1000,
+        "extents_requested": 1000,
+        "fsync": {
+          "max_us": 19642.272999999997,
+          "mean_us": 17451.53733333333,
+          "min_us": 14503.641,
+          "n": 3,
+          "p50_us": 18208.698,
+          "p90_us": 19642.272999999997,
+          "p99_us": 19642.272999999997
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 131315.15899999999,
+          "mean_us": 121751.483,
+          "min_us": 113223.112,
+          "n": 3,
+          "p50_us": 120716.178,
+          "p90_us": 131315.15899999999,
+          "p99_us": 131315.15899999999
+        }
+      },
+      {
+        "backend": "xfs-reflink",
+        "clone": {
+          "max_us": 531124.986,
+          "mean_us": 247669.662,
+          "min_us": 97064.318,
+          "n": 3,
+          "p50_us": 114819.682,
+          "p90_us": 531124.986,
+          "p99_us": 531124.986
+        },
+        "dirty_kib_before_clone_max": 16,
+        "dirty_mib": 0,
+        "error": null,
+        "extents_exact_after": 10000,
+        "extents_exact_before": 10000,
+        "extents_fiemap_before": 10000,
+        "extents_requested": 10000,
+        "fsync": {
+          "max_us": 22814.348,
+          "mean_us": 20127.95033333333,
+          "min_us": 15923.616000000002,
+          "n": 3,
+          "p50_us": 21645.887,
+          "p90_us": 22814.348,
+          "p99_us": 22814.348
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 553939.3339999999,
+          "mean_us": 267797.6123333333,
+          "min_us": 112987.934,
+          "n": 3,
+          "p50_us": 136465.56900000002,
+          "p90_us": 553939.3339999999,
+          "p99_us": 553939.3339999999
+        }
+      },
+      {
+        "backend": "xfs-reflink",
+        "clone": {
+          "max_us": 182591.234,
+          "mean_us": 174753.81633333332,
+          "min_us": 169081.77899999998,
+          "n": 3,
+          "p50_us": 172588.43600000002,
+          "p90_us": 182591.234,
+          "p99_us": 182591.234
+        },
+        "dirty_kib_before_clone_max": 131088,
+        "dirty_mib": 128,
+        "error": null,
+        "extents_exact_after": 10002,
+        "extents_exact_before": 10000,
+        "extents_fiemap_before": 10000,
+        "extents_requested": 10000,
+        "fsync": {
+          "max_us": 26369.809,
+          "mean_us": 24205.052666666666,
+          "min_us": 21506.856,
+          "n": 3,
+          "p50_us": 24738.493,
+          "p90_us": 26369.809,
+          "p99_us": 26369.809
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 207329.72699999998,
+          "mean_us": 198958.86899999998,
+          "min_us": 194095.29200000002,
+          "n": 3,
+          "p50_us": 195451.58800000002,
+          "p90_us": 207329.72699999998,
+          "p99_us": 207329.72699999998
+        }
+      },
+      {
+        "backend": "xfs-reflink",
+        "clone": {
+          "max_us": 2297067.087,
+          "mean_us": 1028652.8126666667,
+          "min_us": 376857.294,
+          "n": 3,
+          "p50_us": 412034.05700000003,
+          "p90_us": 2297067.087,
+          "p99_us": 2297067.087
+        },
+        "dirty_kib_before_clone_max": 8,
+        "dirty_mib": 0,
+        "error": null,
+        "extents_exact_after": 50000,
+        "extents_exact_before": 50000,
+        "extents_fiemap_before": 50000,
+        "extents_requested": 50000,
+        "fsync": {
+          "max_us": 71794.75200000001,
+          "mean_us": 51641.405666666666,
+          "min_us": 39928.513999999996,
+          "n": 3,
+          "p50_us": 43200.951,
+          "p90_us": 71794.75200000001,
+          "p99_us": 71794.75200000001
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 2368861.839,
+          "mean_us": 1080294.2183333335,
+          "min_us": 416785.80799999996,
+          "n": 3,
+          "p50_us": 455235.008,
+          "p90_us": 2368861.839,
+          "p99_us": 2368861.839
+        }
+      },
+      {
+        "backend": "xfs-reflink",
+        "clone": {
+          "max_us": 1610547.8660000002,
+          "mean_us": 1394359.4816666667,
+          "min_us": 971823.204,
+          "n": 3,
+          "p50_us": 1600707.375,
+          "p90_us": 1610547.8660000002,
+          "p99_us": 1610547.8660000002
+        },
+        "dirty_kib_before_clone_max": 131100,
+        "dirty_mib": 128,
+        "error": null,
+        "extents_exact_after": 50002,
+        "extents_exact_before": 50000,
+        "extents_fiemap_before": 50000,
+        "extents_requested": 50000,
+        "fsync": {
+          "max_us": 19735.562,
+          "mean_us": 18625.377000000004,
+          "min_us": 17210.788,
+          "n": 3,
+          "p50_us": 18929.781,
+          "p90_us": 19735.562,
+          "p99_us": 19735.562
+        },
+        "nocow_flag": null,
+        "reps_ok": 3,
+        "total": {
+          "max_us": 1627758.6539999999,
+          "mean_us": 1412984.8586666668,
+          "min_us": 991558.7660000001,
+          "n": 3,
+          "p50_us": 1619637.156,
+          "p90_us": 1627758.6539999999,
+          "p99_us": 1627758.6539999999
+        }
+      }
+    ],
+    "gate": {
+      "btrfs_cow_p50_ms": 405.067837,
+      "btrfs_threshold_ms": 100,
+      "dirty_mib": 0,
+      "extents": 50000,
+      "xfs_p50_ms": 455.235008
+    },
+    "params": {
+      "dirty_mib": [
+        0,
+        128
+      ],
+      "extents": [
+        1000,
+        10000,
+        50000
+      ],
+      "pool_mib": 3072,
+      "reps": 3,
+      "seed": 2927493121,
+      "stride_bytes": 8192
+    },
+    "pools": [
+      {
+        "direct_io": true,
+        "kind": "btrfs",
+        "size_mib": 3072
+      },
+      {
+        "direct_io": true,
+        "kind": "xfs",
+        "size_mib": 3072
+      }
+    ],
+    "verdict": "Gate cell: 50000 extents, dirty 0 MiB: Btrfs-CoW p50 405.1 ms vs XFS p50 455.2 ms (threshold: Btrfs > 100 ms AND XFS significantly lower, i.e. < 50 % of Btrfs). => **no pivot triggered** (advisory, WSL2 loop-on-ext4-on-VHDX; re-verify on bare metal)."
+  }
+}

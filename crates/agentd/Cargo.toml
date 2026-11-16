@@ -1,0 +1,15 @@
+[package]
+name = "agentd"
+description = "agentd: Aether runtime daemon. Placeholder."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "agentd"
+path = "src/main.rs"
+
+[dependencies]

@@ -1,0 +1,167 @@
+{
+  "env": {
+    "argv": [
+      "./target/release/phase0-harness",
+      "f0-4-enospc-ballast"
+    ],
+    "authority": "AdvisoryWsl2",
+    "authority_note": "WSL2 = nested virtualisation + loop devices on ext4-on-VHDX + host page cache beneath. Valid for functional/crash-semantics conclusions; latency/throughput numbers MUST NOT be published as baselines (docs/PHASE0_FALSIFICATION.md section 1).",
+    "boot_id": "463b5974-ab7f-4309-843d-6f0dc4d057de",
+    "cached_mib_at_start": 133,
+    "collected_at": "2026-11-16T09:02:41Z",
+    "cpu_model": "11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz",
+    "dirty_kib_at_start": 224,
+    "euid": 0,
+    "host_declared": "Surface Pro 8, i5-1135G7, 16 GiB RAM (as declared in docs/PHASE0_FALSIFICATION.md section 1.1; not verifiable from inside WSL2)",
+    "is_wsl2": true,
+    "kernel_release": "6.6.87.2-microsoft-standard-WSL2",
+    "kernel_version_line": "Linux version 6.6.87.2-microsoft-standard-WSL2 (root@439a258ad544) (gcc (GCC) 11.2.0, GNU ld (GNU Binutils) 2.37) #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025",
+    "kvm_present": true,
+    "logical_cpus": 8,
+    "mem_available_mib": 7458,
+    "mem_total_mib": 7942,
+    "pool_root": "/var/lib/aether/phase0",
+    "pool_root_fs": "ext2/3/4",
+    "power_state": "BAT1: status=Full online=unknown; AC1: status=unknown online=1",
+    "tools": [
+      [
+        "rustc",
+        "unavailable"
+      ],
+      [
+        "btrfs-progs",
+        "btrfs-progs v5.16.2"
+      ],
+      [
+        "xfsprogs (mkfs.xfs)",
+        "mkfs.xfs version 5.13.0"
+      ],
+      [
+        "e2fsprogs (mkfs.ext4)",
+        "mke2fs 1.46.5 (30-Dec-2021)"
+      ],
+      [
+        "git",
+        "git version 2.34.1"
+      ],
+      [
+        "losetup",
+        "losetup from util-linux 2.37.2"
+      ],
+      [
+        "firecracker",
+        "Firecracker v1.10.1"
+      ]
+    ]
+  },
+  "experiment": "F0-4",
+  "result": {
+    "avail_bytes": {
+      "after_destroy": 134094848,
+      "after_release": 67108864,
+      "before_release": 0,
+      "final": 1913241600,
+      "full": 0,
+      "pristine": 1914961920,
+      "with_victims_and_ballast": 1712037888
+    },
+    "btrfs_df_at_enospc": "Data, single: total=1914961920, used=1914961920\nSystem, DUP: total=8388608, used=16384\nMetadata, DUP: total=107347968, used=2277376\nGlobalReserve, single: total=5767168, used=0\n",
+    "fill": {
+      "fill_seconds": 2.506607612,
+      "stage1_bulk": {
+        "bytes": 1711931392,
+        "ended_with": "No space left on device (os error 28)",
+        "enospc": true,
+        "files": 26
+      },
+      "stage2_4k": {
+        "bytes": 106496,
+        "ended_with": "No space left on device (os error 28)",
+        "enospc": true
+      },
+      "stage3_tiny": {
+        "ended_with": "No space left on device (os error 28)",
+        "enospc": true,
+        "files": 0
+      }
+    },
+    "gate": {
+      "pivot_triggered": true,
+      "tombstone_failures_at_enospc": 20
+    },
+    "params": {
+      "ballast_mib": 64,
+      "direct_io": true,
+      "pool_mib": 2048,
+      "seed": 2927493121,
+      "victim_mib": 128
+    },
+    "probes_after_release": [
+      {
+        "detail": "None; avail +64 MiB after 0.00s (ballast 64 MiB)",
+        "name": "BTRFS_IOC_SYNC after unlinking ballast",
+        "ok": true
+      },
+      {
+        "detail": "integrity=true, 2000 keys",
+        "name": "redb reopen + integrity check after the failed-commit episode",
+        "ok": true
+      },
+      {
+        "detail": "20 committed, 0 failed",
+        "name": "redb tombstone txns x20 after ballast release",
+        "ok": true
+      },
+      {
+        "detail": "ok via V2",
+        "name": "destroy subvolume victim-b after ballast release",
+        "ok": true
+      },
+      {
+        "detail": "0.2s",
+        "name": "remove the filler tree",
+        "ok": true
+      },
+      {
+        "detail": "subvol=true redb=true file=true",
+        "name": "post-recovery: create subvolume / redb commit / write 1 MiB",
+        "ok": true
+      }
+    ],
+    "probes_full": [
+      {
+        "detail": "0 committed, 20 failed; first error: I/O error: No space left on device (os error 28)",
+        "name": "redb tombstone txns (64 B values) x20 at ENOSPC",
+        "ok": false
+      },
+      {
+        "detail": "0 committed, 5 failed; first error: Previous I/O error occurred. Please close and re-open the database.",
+        "name": "redb growth txns (2 MiB values) x5 at ENOSPC",
+        "ok": false
+      },
+      {
+        "detail": "I/O error: No space left on device (os error 28)",
+        "name": "create a second redb file at ENOSPC",
+        "ok": false
+      },
+      {
+        "detail": "ok via V2",
+        "name": "destroy subvolume victim-a at ENOSPC (before releasing ballast)",
+        "ok": true
+      },
+      {
+        "detail": "ok",
+        "name": "unlink a tiny file at ENOSPC",
+        "ok": true
+      },
+      {
+        "detail": "No space left on device (os error 28)",
+        "name": "create+write a new 900 B file at ENOSPC (control: expected to fail)",
+        "ok": false
+      }
+    ],
+    "recovered_pct_of_pristine": 99.91016427104722,
+    "recovery_fully_functional": true,
+    "verdict": "**PIVOT TRIGGERED**: a tombstone-sized redb transaction failed at ENOSPC on the same pool -> `meta/` MUST live on a separate disk/filesystem from the data pool."
+  }
+}

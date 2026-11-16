@@ -1,0 +1,15 @@
+[package]
+name = "aos-cli"
+description = "aos: Aether CLI. Placeholder."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "aos"
+path = "src/main.rs"
+
+[dependencies]

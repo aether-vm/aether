@@ -1,0 +1,148 @@
+{
+  "env": {
+    "argv": [
+      "./target/release/phase0-harness",
+      "f0-3-mkfs-git",
+      "--files",
+      "10000,50000"
+    ],
+    "authority": "AdvisoryWsl2",
+    "authority_note": "WSL2 = nested virtualisation + loop devices on ext4-on-VHDX + host page cache beneath. Valid for functional/crash-semantics conclusions; latency/throughput numbers MUST NOT be published as baselines (docs/PHASE0_FALSIFICATION.md section 1).",
+    "boot_id": "463b5974-ab7f-4309-843d-6f0dc4d057de",
+    "cached_mib_at_start": 860,
+    "collected_at": "2026-11-16T09:01:32Z",
+    "cpu_model": "11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz",
+    "dirty_kib_at_start": 168,
+    "euid": 0,
+    "host_declared": "Surface Pro 8, i5-1135G7, 16 GiB RAM (as declared in docs/PHASE0_FALSIFICATION.md section 1.1; not verifiable from inside WSL2)",
+    "is_wsl2": true,
+    "kernel_release": "6.6.87.2-microsoft-standard-WSL2",
+    "kernel_version_line": "Linux version 6.6.87.2-microsoft-standard-WSL2 (root@439a258ad544) (gcc (GCC) 11.2.0, GNU ld (GNU Binutils) 2.37) #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025",
+    "kvm_present": true,
+    "logical_cpus": 8,
+    "mem_available_mib": 7445,
+    "mem_total_mib": 7942,
+    "pool_root": "/var/lib/aether/phase0",
+    "pool_root_fs": "ext2/3/4",
+    "power_state": "BAT1: status=Full online=unknown; AC1: status=unknown online=1",
+    "tools": [
+      [
+        "rustc",
+        "unavailable"
+      ],
+      [
+        "btrfs-progs",
+        "btrfs-progs v5.16.2"
+      ],
+      [
+        "xfsprogs (mkfs.xfs)",
+        "mkfs.xfs version 5.13.0"
+      ],
+      [
+        "e2fsprogs (mkfs.ext4)",
+        "mke2fs 1.46.5 (30-Dec-2021)"
+      ],
+      [
+        "git",
+        "git version 2.34.1"
+      ],
+      [
+        "losetup",
+        "losetup from util-linux 2.37.2"
+      ],
+      [
+        "firecracker",
+        "Firecracker v1.10.1"
+      ]
+    ]
+  },
+  "experiment": "F0-3",
+  "result": {
+    "coefficients_us_per_file": {
+      "mkfs_ext4_d": 129.763341725,
+      "populate": 67.810209125,
+      "tar_unpack": 132.16833929999996
+    },
+    "findings": "- UID/GID/mode fidelity of `mkfs.ext4 -d` from a root-unpacked tree: **OK (0 mismatches)** (zero offset expected when the unpack preserves numeric owners).\n- Btrfs fork changes `st_dev` of every file: **true** (git ignores `st_dev` on Linux unless `core.checkStat`/`USE_STDEV` says otherwise); other stat fields (`ino`/`ctime`/`mtime`/`uid`/`gid`/`size`) preserved by the snapshot: **true**.\n- First `git status` in the fork triggers a full re-hash / index rewrite: **true**. Engineering countermeasure: pre-refresh the Git index (`git update-index --refresh` / `git status`) at import time and again right after fork materialisation.\n",
+    "fork_changes_st_dev": true,
+    "fork_triggers_rehash_or_index_rewrite": true,
+    "params": {
+      "direct_io": true,
+      "files": [
+        10000,
+        50000
+      ],
+      "pool_mib": 4096,
+      "seed": 2927493121
+    },
+    "rows": [
+      {
+        "data_bytes": 42334752,
+        "dirs_total": 1271,
+        "e2fsck_exit": 0,
+        "files": 10000,
+        "fork_snapshot_ms": 6.41247,
+        "git_add_commit_ms": 1774.22853,
+        "git_entries": 11293,
+        "image_inodes": 31031,
+        "image_mib": 217,
+        "index_rewritten_by_first_fork_status": true,
+        "mkfs_d_ms": 1211.1348520000001,
+        "populate_ms": 624.618415,
+        "stat_mismatch": {
+          "ctime": 0,
+          "dev": 2000,
+          "gid": 0,
+          "ino": 0,
+          "mtime": 0,
+          "size": 0,
+          "uid": 0
+        },
+        "stat_samples": 2000,
+        "status_fork_cold_ms": 80.974648,
+        "status_fork_dirty_output": false,
+        "status_fork_first_ms": 37.016849,
+        "status_fork_second_ms": 26.853111,
+        "status_orig_warm_ms": 34.036087,
+        "tar_create_ms": 167.241173,
+        "uid_mismatches": 0,
+        "uid_samples": 64,
+        "unpack_ms": 1103.041694
+      },
+      {
+        "data_bytes": 212335924,
+        "dirs_total": 5271,
+        "e2fsck_exit": 0,
+        "files": 50000,
+        "fork_snapshot_ms": 9.851853,
+        "git_add_commit_ms": 6837.353512,
+        "git_entries": 55293,
+        "image_inodes": 145431,
+        "image_mib": 824,
+        "index_rewritten_by_first_fork_status": true,
+        "mkfs_d_ms": 6401.6685210000005,
+        "populate_ms": 3337.02678,
+        "stat_mismatch": {
+          "ctime": 0,
+          "dev": 2000,
+          "gid": 0,
+          "ino": 0,
+          "mtime": 0,
+          "size": 0,
+          "uid": 0
+        },
+        "stat_samples": 2000,
+        "status_fork_cold_ms": 217.421041,
+        "status_fork_dirty_output": false,
+        "status_fork_first_ms": 223.22298700000002,
+        "status_fork_second_ms": 142.154484,
+        "status_orig_warm_ms": 115.277642,
+        "tar_create_ms": 971.249711,
+        "uid_mismatches": 0,
+        "uid_samples": 64,
+        "unpack_ms": 6389.775266
+      }
+    ],
+    "uid_fidelity_ok": true
+  }
+}
