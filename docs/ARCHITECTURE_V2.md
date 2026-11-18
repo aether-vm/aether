@@ -84,7 +84,7 @@ flowchart TB
 ### 3.1 存储池布局与默认属性（合入 `fsck` 审查修正）
 在 `/var/lib/aether/pool` 挂载独立 **Btrfs 存储池**（备选 `XFS reflink` 作为纯块模式后端）：
 - **块镜像默认保留 Btrfs CoW 与数据校验和**：不使用全局镜像 `NOCOW`（因为 `NOCOW` 文件一旦执行 `FICLONE` 共享，首次覆盖写依然触发 CoW，却永久丧失数据块校验和）；具体 extent 碎片对 `FICLONE` 耗时的影响由 Phase 0 实测数据裁决是否切换 `XFS` 块后端。
-- **`meta/` 目录隔离与空文件继承 `NOCOW`**：池初始化时创建独立普通目录 `meta/`（**严禁对 `meta/` 创建子卷快照或 reflink**），先对空的 `meta/` 目录执行 `chattr +C`，随后在其中创建 `aether.redb`，使其合法继承单文件 `NOCOW` 以避免 B-Tree 双重写放大。
+- **`meta/` 分盘存放（以 `HANDOFF.md` Phase 0 实测转向定论为准）**：`aether.redb` **存放于 Btrfs 数据池之外**的独立宿主机 `ext4/XFS` 目录（如 `/var/lib/aether/meta/aether.redb`），**不再放入 `/var/lib/aether/pool/` Btrfs 池内**（F0-1 实测同池快照全局事务使 `redb` 提交 P99 显著升高；F0-4 实测池写满 `ENOSPC` 时同池删除事务 100% 失败）。`meta/` 目录**严禁**对其创建子卷快照或 reflink；其所在宿主文件系统若为 `ext4/XFS` 则无需 `NOCOW` 处理，池内 `pool/` 仅存放受管对象与 `quarantine/`。
 - **防死锁压舱石与池护栏**：启动时强制检查禁用 `qgroups` 与 `autodefrag`；预分配 `ballast` 压舱文件（生产 `2GiB`，WSL2 小池按比例配置），并在 Phase 0 验证池满释放压舱文件后 `redb` 删除事务可正常提交。
 
 ### 3.2 OCI 镜像与本地目录的不可变导入
@@ -124,7 +124,7 @@ pub struct Ephemeral<T> { inner: T, boot_id: u128 }
 4. **I4 崩溃恢复铁律（唯回滚原则）**：启动恢复时，**任何状态不是 `Committed`（即处于 `Preparing`）的帧无条件回滚销毁**，绝不尝试猜测稀疏内存文件完整性做前滚。
 
 ### 4.2 安全启动恢复与防误删孤儿隔离（R0 ~ R9，修正 A1 / A5 / A7）
-1. **R0 池防呆与空库保护（A5）**：获取 `pool/.lock`；**若 `objects/` 目录非空而 `meta/aether.redb` 缺失或损坏无法打开，立即拒绝启动并报警**（严禁自动初始化新空库后触发孤儿清扫误删全池数据！）；校验 `POOL_UUID` 一致。
+1. **R0 池防呆与空库保护（A5）**：获取 `pool/.lock`（校验池与外置 `meta/` 的 `POOL_UUID` 配对）；**若池 `objects/` 目录非空而独立宿主机 `meta/aether.redb`（位于 Btrfs 池之外，如 `/var/lib/aether/meta/aether.redb`）缺失或损坏无法打开，立即拒绝启动并报警**（严禁自动初始化新空库后触发孤儿清扫误删全池数据！）；校验 `POOL_UUID` 一致。
 2. **R1 纪元递增与跨重启 `Volatile` 失效（A1）**：读取宿主 `/proc/sys/kernel/random/boot_id`；`daemon_epoch += 1` 写入 `redb`。若检测到 `boot_id` 与上一纪元不同，立即将所有 `Volatile` 状态的 `Committed` 帧批量置为 `Expired`，移除其全部 `Hold` 并排队回收其磁盘克隆文件。
 3. **R2 旧纪元进程与网关围栏清剿（A7）**：
    - **网关纪元围栏**：首先连接 `aos-gw` 下发新 `daemon_epoch`，强制 `aos-gw` 立即作废所有 `< current_epoch` 的 `(slot, world, epoch)` 凭证绑定并清空对应连接状态，收到确认后方继续；
@@ -163,7 +163,43 @@ pub struct Ephemeral<T> { inner: T, boot_id: u128 }
 
 ---
 
-## 七、18 个月四阶段实事求是路线图与止损门禁
+## 七、控制面编排契约、统一客体代理与扩展隔离边界（v2.2 架构补强）
+
+本节沉淀控制面与沙箱交互的通用规范，不改变前文任何既有红线。
+
+1. **双驱动同构客体代理（`aos-guest` over `socketpair` / `vsock`）**
+   - `Exec` 与沙箱内文件读写**严禁由宿主侧直接操作 `TreeStore` 子卷**（防符号链接竞态穿越与 `userns` UID 错位；亦与 `FirecrackerDriver` 宿主零挂载不可信块镜像红线同构）。两种驱动统一由沙箱内常驻静态 `aos-guest` 执行：`NamespaceDriver` 经 `socketpair`，`FirecrackerDriver` 经 `vsock`。
+   - 每次前台 `Exec` 置入**独立子 cgroup**，超时或结束时执行 `cgroup.kill`，杜绝双 fork 逃逸残留进程。
+   - 输出采用**流式 `bytes`** 并对 stdout/stderr 分流，超限做**头尾截断**并标注；宿主/`aos-guest` 持续排空管道，防止子进程因写阻塞挂死。
+
+2. **分层幂等与崩溃显式未知契约**
+   - **元数据操作**（导入、创建、提交帧、销毁）在 `redb` 单写者事务内原子记录 `RequestId`，为**真幂等**。
+   - **可写沙箱 `Exec`** 仅提供 **World 存活期内**的 `RequestId` 结果缓存与去重。
+   - 跨 `agentd` 崩溃重启，对未决或历史 `Exec` **一律返回显式 `WorldLost` / `OutcomeUnknown`，严禁猜测性自动重放**；是否对账或从 `Durable Frame` 重建由客户端决定。
+
+3. **租约分层存储、停机顺延与围栏令牌（Fencing Token）**
+   - **`World` 租约纯驻内存**，使用单调时钟，与磁盘 `fsync` 尾延迟解耦。
+   - **`Durable Frame` 的 `Pin` 租约**内存续约、低频落盘；`agentd` 启动恢复时，将存活 `Pin` 租约统一重置为 `now + lease_ttl`，防止停机维护期间墙钟流逝导致重启后误删保留帧。
+   - 标签创建后**不可变**；销毁的 `World` 留**短时墓碑**可查；批量选择器禁止空选择并记录调用主体。
+   - 客户端接管所有权时获得单调递增的 **`fencing_token`**，后续变更类调用须携带，低于当前令牌的请求返回 `FencedOut`，防止分区后“诈尸”实例双写。
+
+4. **`NamespaceDriver` 加固基线与无 `vsock` 网关身份绑定**
+   - 加固基线：`userns`（清空工作负载 capabilities + `no_new_privs`）+ 严格 `seccomp`（禁止嵌套命名空间、`clone3`、`mount` 族、`io_uring`、`bpf` 等）；**绝不为沙箱内应用开放嵌套 `userns`**（Linux 本地提权高发面）。无头浏览器类负载在 Phase 1 仅支持 `chromium --no-sandbox`（由 World 自身作为隔离边界）并配额 `/dev/shm`；浏览器完整沙箱隔离随 Phase 2 `FirecrackerDriver`。
+   - **无 `vsock` 的身份绑定**：宿主在 World 独立、无外网路由的 `netns` 回环上预建监听套接字，并将 fd 移交 `aos-gw`，与 `(world_id, daemon_epoch)` **物理绑定**，不依赖可伪造的源 IP。
+   - **澄清**：`aos-gw` L1 是**反向网关**（`BASE_URL` 转发 / 重签），**不是** `HTTP CONNECT` 端到端 TLS 隧道内的头注入；隧道内注入需终结 TLS，只属 L2 兜底。L1 不承诺对压缩流响应体做防反射扫描。网关规则应细化到**主机 + 路径前缀 + 方法**。
+
+5. **可选远程控制面前置隔离**
+   - `agentd` 本体**仅监听本地受限 UDS**，不开放 TCP。
+   - 跨机控制面需求一律经**独立低权前置代理进程**终结**强制 mTLS**（拒绝静态 Token），校验调用主体对目标资源的归属，并以 `nftables` 阻断沙箱回连该代理与 `agentd`。
+   - 须明确：任一持有有效客户端证书的调用方失陷，等价于其可控范围内沙箱资源暴露；证书应按调用方实例签发、短有效期、可单独吊销。
+
+6. **`TreeStore` 单沙箱磁盘限额演进（Btrfs `squota` 候选）**
+   - 因已禁用传统 `qgroups`，单个 `World` 可能写满整个池。池级护栏（压舱文件、配额监控、`ResourceExhausted`）为现行兜底。
+   - **Linux 6.7+ `Btrfs simple quotas (squota)`** 列为候选方案，需先经**快照/分叉延迟证伪**后方可采用，不先于实测承诺。
+
+---
+
+## 八、18 个月四阶段实事求是路线图与止损门禁
 
 - **Phase 0（第 1 ~ 4 周）：内核原语证伪与基线实测**  
   执行独立手册 `./PHASE0_FALSIFICATION.md` 定义的全部证伪实验（WSL2 测功能正确性，云端裸金属 KVM 测真实延迟基线）。若 Btrfs 块镜像碎片导致 `FICLONE` 暂停超标，立即按预案将 `BlockStore` 切至独立 `XFS reflink` 后端。

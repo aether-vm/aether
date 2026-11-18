@@ -62,3 +62,5 @@ cargo test --workspace
 2. **实现并跑通 `F0-5` & `F0-6`**：测量 Firecracker 快照恢复至 `vsock` 首条命令返回延迟（冷缓存 / 热缓存 / `mincore` + `fadvise(WILLNEED)` 预热）及 `File Backend (MAP_PRIVATE)` 多克隆物理内存共享率（PSS）。
 3. **实现并跑通 `F0-7`**：验证热分叉恢复后随机数熵池发散、`ss -K` 秒断外部连接及 Guest 内 `127.0.0.1` 回环连接存活。
 4. **实现 `crates/aos-meta` 最小提交恢复状态机并跑通 `F0-8`**：100 次随机 `kill -9` 强杀恢复零孤儿泄漏验证，随后提请红队 `fsck` 进行 **Gate 2（Phase 0 结项与 Phase 1 准入）** 评审。
+
+> **备忘**：`ARCHITECTURE_V2.md` 已新增第七节《控制面编排契约、统一客体代理与扩展隔离边界（v2.2 架构补强）》（统一 `aos-guest` 客体代理、分层幂等与 `WorldLost`/`OutcomeUnknown` 契约、租约分层与围栏令牌、`NamespaceDriver` 加固基线、远程控制面前置隔离），路线图顺延为第八节；同时已将 `meta/aether.redb` 位置表述对齐上文分盘定论。另将 **Linux 6.7+ Btrfs `squota` 快照性能测试**列入 Phase 1 `TreeStore` 单沙箱配额前置验证候选。
