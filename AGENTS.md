@@ -40,3 +40,4 @@
 - `./docs/ARCHITECTURE_V2.md`：v2.1 核心运行时架构规范（双模存储、提交恢复协议、热分叉握手与威胁模型）。
 - `./docs/PHASE0_FALSIFICATION.md`：Phase 0 八大内核原语证伪实验手册与转向门禁（唯一指标源）。
 - `./docs/HANDOFF.md`：跨设备研发交接、已完成实测结论（含 `meta/aether.redb` 分盘存放定论）与下一步紧接任务清单。
+- `./docs/INFRA_REQUIREMENTS.md`：研发与压测基础设施环境规格书（本地机/云裸金属选型与租用时机、`meta/` 与 `pool/` 分文件系统布局、机器到手 30 秒验收与压测环境指纹）；**不定义任何性能指标或门禁阈值**，指标唯一源仍为 `PHASE0_FALSIFICATION.md`。

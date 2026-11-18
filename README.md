@@ -31,7 +31,8 @@ aether/
 └── docs/
     ├── PRODUCT_POSITIONING.md # System layer positioning, 5 core capabilities & 6 industry use cases
     ├── ARCHITECTURE_V2.md     # Full v2.1 architecture, crash recovery & threat model spec
-    └── PHASE0_FALSIFICATION.md# Phase 0 kernel falsification suite & pivot gates
+    ├── PHASE0_FALSIFICATION.md# Phase 0 kernel falsification suite & pivot gates
+    └── INFRA_REQUIREMENTS.md  # Dev/benchmark testbed specs, procurement timing & 30-second acceptance checks
 ```
 
 ## Documentation Quick Links
@@ -39,6 +40,7 @@ aether/
 1. **[Product Positioning & Use Cases](./docs/PRODUCT_POSITIONING.md)** — What `Aether` is, how it differs from plain containers/sandboxes, and where it creates commercial value.
 2. **[Architecture Specification v2.1](./docs/ARCHITECTURE_V2.md)** — Dual storage model, atomic `redb` commit invariants, Firecracker hot-fork reseed protocol, and `aos-gw` security design.
 3. **[Phase 0 Falsification Suite](./docs/PHASE0_FALSIFICATION.md)** — Hardware/WSL2 constraints and the 8 mandatory kernel experiments before Phase 1 coding.
+4. **[Infrastructure & Testbed Requirements](./docs/INFRA_REQUIREMENTS.md)** — Which machines to use and when to rent servers, storage-pool/`redb` filesystem layout, 30-second host acceptance checks, and the mandatory environment fingerprint for every benchmark report (it defines no metrics or gates; those stay in `PHASE0_FALSIFICATION.md`).
 
 ## Contribution & License
 
