@@ -18,5 +18,8 @@ getrandom.workspace = true
 unicode-normalization.workspace = true
 serde = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 serde_json.workspace = true

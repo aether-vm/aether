@@ -1,6 +1,6 @@
 [package]
 name = "aos-meta"
-description = "Phase 1: redb single-writer commit point and crash recovery. Placeholder."
+description = "redb single-writer commit point, Preparing->Committed frame state machine and rollback-only crash recovery (R0~R6)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+aos-types = { path = "../aos-types", features = ["serde"] }
+redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+getrandom.workspace = true

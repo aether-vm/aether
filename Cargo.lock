@@ -77,6 +77,14 @@ version = "0.1.0-alpha.0"
 [[package]]
 name = "aos-meta"
 version = "0.1.0-alpha.0"
+dependencies = [
+ "aos-types",
+ "getrandom",
+ "redb",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "aos-sandbox"
@@ -91,6 +99,7 @@ name = "aos-types"
 version = "0.1.0-alpha.0"
 dependencies = [
  "getrandom",
+ "libc",
  "serde",
  "serde_json",
  "thiserror",

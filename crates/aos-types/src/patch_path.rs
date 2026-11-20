@@ -346,10 +346,10 @@ fn is_windows_reserved_name(component: &str) -> bool {
     for prefix in ["COM", "LPT"] {
         if let Some(rest) = up.strip_prefix(prefix) {
             let mut it = rest.chars();
-            if let (Some(d), None) = (it.next(), it.next()) {
-                if d.is_ascii_digit() || matches!(d, '\u{b9}' | '\u{b2}' | '\u{b3}') {
-                    return true;
-                }
+            if let (Some(d), None) = (it.next(), it.next())
+                && (d.is_ascii_digit() || matches!(d, '\u{b9}' | '\u{b2}' | '\u{b3}'))
+            {
+                return true;
             }
         }
     }
@@ -649,13 +649,13 @@ impl PatchPathValidator {
         // 3. collisions and file/directory conflicts among the patch's own `Put`s
         let mut put_keys: HashMap<String, &str> = HashMap::new();
         for (e, _) in &parsed {
-            if matches!(e.op, PatchOp::Put(_)) {
-                if let Some(prev) = put_keys.insert(self.fold_path(&e.path), e.path.as_str()) {
-                    return Err(err(
-                        &e.path,
-                        PatchPathViolation::FoldCollision { other: prev.to_owned() },
-                    ));
-                }
+            if matches!(e.op, PatchOp::Put(_))
+                && let Some(prev) = put_keys.insert(self.fold_path(&e.path), e.path.as_str())
+            {
+                return Err(err(
+                    &e.path,
+                    PatchPathViolation::FoldCollision { other: prev.to_owned() },
+                ));
             }
         }
         for (e, comps) in &parsed {

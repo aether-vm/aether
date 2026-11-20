@@ -112,6 +112,23 @@ impl fmt::Debug for BootId {
     }
 }
 
+/// Serialized as the canonical lowercase `8-4-4-4-12` string; deserialization is as strict as
+/// [`BootId::parse`].
+#[cfg(feature = "serde")]
+impl serde::Serialize for BootId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for BootId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = <String as serde::Deserialize>::deserialize(d)?;
+        BootId::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +188,23 @@ mod tests {
         assert!(matches!(BootId::read_from(&missing), Err(BootIdError::Io { .. })));
         for p in [p, p2, p3, p4] {
             let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip_is_canonical_and_strict() {
+        let id = BootId::parse(GOOD).unwrap();
+        let j = serde_json::to_string(&id).unwrap();
+        assert_eq!(j, format!("\"{GOOD}\""));
+        assert_eq!(serde_json::from_str::<BootId>(&j).unwrap(), id);
+        for bad in [
+            j.to_uppercase(),
+            format!("\"{GOOD}\\n\""),
+            "\"0a1b2c3d4e5f6789abcdef0123456789\"".to_owned(),
+            "42".to_owned(),
+        ] {
+            assert!(serde_json::from_str::<BootId>(&bad).is_err(), "accepted {bad}");
         }
     }
 
