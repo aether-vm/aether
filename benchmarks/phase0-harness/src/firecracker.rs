@@ -35,14 +35,18 @@ pub struct MemBackend {
 }
 
 /// Exact Firecracker v1.10 / v1.11 `PUT /snapshot/load` JSON payload.
+///
+/// `enable_diff_snapshots` (v1.10.x) is omitted when `false` so the payload is accepted verbatim
+/// by Firecracker v1.10.1, v1.11+, and v1.12+ without version-specific unknown-field errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotLoadParams {
     /// Path to `vmstate` snapshot file.
     pub snapshot_path: PathBuf,
     /// Memory backend configuration (`File` -> `MAP_PRIVATE`).
     pub mem_backend: MemBackend,
-    /// Enable KVM dirty-page tracking (`track_dirty_pages`, replaces deprecated `enable_diff_snapshots`).
-    pub track_dirty_pages: bool,
+    /// Enable KVM dirty-page tracking (`enable_diff_snapshots` on v1.10.x; omitted when `false`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enable_diff_snapshots: bool,
     /// Resume vCPUs immediately on load (`true`), or leave paused (`false`).
     pub resume_vm: bool,
 }
@@ -53,7 +57,7 @@ impl SnapshotLoadParams {
     pub fn file_backend(
         snapshot_path: impl Into<PathBuf>,
         mem_file_path: impl Into<PathBuf>,
-        track_dirty_pages: bool,
+        enable_diff_snapshots: bool,
         resume_vm: bool,
     ) -> Self {
         Self {
@@ -62,7 +66,7 @@ impl SnapshotLoadParams {
                 backend_type: "File".to_owned(),
                 backend_path: mem_file_path.into(),
             },
-            track_dirty_pages,
+            enable_diff_snapshots,
             resume_vm,
         }
     }
@@ -465,13 +469,33 @@ pub mod linux {
             work_dir: &Path,
             startup_timeout: Duration,
         ) -> Result<Self> {
+            Self::spawn_in_netns(firecracker_bin, api_sock, work_dir, None, startup_timeout)
+        }
+
+        /// Spawn a fresh `firecracker --api-sock <api_sock>` optionally inside a Linux `ip netns`
+        /// (needed on Firecracker v1.10/v1.11 so concurrent clones with snapshot-baked TAP names
+        /// do not collide on `host_dev_name`).
+        pub fn spawn_in_netns(
+            firecracker_bin: &Path,
+            api_sock: &Path,
+            work_dir: &Path,
+            netns: Option<&str>,
+            startup_timeout: Duration,
+        ) -> Result<Self> {
             let _ = std::fs::remove_file(api_sock);
             std::fs::create_dir_all(work_dir)
                 .with_context(|| format!("create work dir {}", work_dir.display()))?;
             let stderr_stdio = File::create(work_dir.join("firecracker.stderr.log"))
                 .map(Stdio::from)
                 .unwrap_or_else(|_| Stdio::null());
-            let child = Command::new(firecracker_bin)
+            let mut cmd = if let Some(ns) = netns {
+                let mut c = Command::new("ip");
+                c.args(["netns", "exec", ns]).arg(firecracker_bin);
+                c
+            } else {
+                Command::new(firecracker_bin)
+            };
+            let child = cmd
                 .arg("--api-sock")
                 .arg(api_sock)
                 .current_dir(work_dir)
@@ -540,6 +564,10 @@ pub mod linux {
         }
 
         /// Send a JSON `PUT` or `PATCH` request and assert a `2xx` response.
+        ///
+        /// Firecracker's `micro_http` server keeps HTTP/1.1 connections open even when
+        /// `Connection: close` is sent, so we parse headers up to `\r\n\r\n` and read exact
+        /// `Content-Length` bytes (0 for `204 No Content`) instead of waiting for EOF.
         pub fn request_json<T: Serialize>(&self, method: &str, path: &str, payload: &T) -> Result<()> {
             let body = serde_json::to_string(payload)?;
             let req = format_http_request(method, path, &body);
@@ -549,9 +577,9 @@ pub mod linux {
             stream.set_write_timeout(Some(self.timeout))?;
             stream.write_all(req.as_bytes())?;
             stream.flush()?;
-            let mut raw = String::new();
-            stream.read_to_string(&mut raw)?;
-            let (code, resp_body) = parse_http_response(&raw)?;
+
+            let (code, resp_body) = read_http_response(&mut stream)
+                .with_context(|| format!("read Firecracker {method} {path} HTTP response"))?;
             ensure!(
                 (200..300).contains(&code),
                 "Firecracker {method} {path} returned HTTP {code}: {resp_body}"
@@ -578,6 +606,56 @@ pub mod linux {
         pub fn resume_vm(&self) -> Result<()> {
             self.request_json("PATCH", "/vm", &VmStatePatch { state: "Resumed" })
         }
+    }
+
+    fn read_http_response(stream: &mut UnixStream) -> Result<(u16, String)> {
+        let mut buf = Vec::with_capacity(512);
+        let mut chunk = [0u8; 512];
+        let header_end = loop {
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            let n = stream.read(&mut chunk)?;
+            ensure!(n > 0, "EOF before end of HTTP response headers");
+            buf.extend_from_slice(&chunk[..n]);
+            ensure!(buf.len() <= 64 * 1024, "HTTP response headers exceed 64 KiB");
+        };
+
+        let head = std::str::from_utf8(&buf[..header_end - 4])
+            .context("non-UTF8 HTTP response headers")?;
+        let status_line = head
+            .lines()
+            .next()
+            .ok_or_else(|| anyhow!("empty HTTP response"))?;
+        let code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .ok_or_else(|| anyhow!("malformed HTTP status line: {status_line:?}"))?
+            .parse()
+            .with_context(|| format!("invalid HTTP status code in {status_line:?}"))?;
+
+        let content_length: usize = head
+            .lines()
+            .skip(1)
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                if k.trim().eq_ignore_ascii_case("content-length") {
+                    v.trim().parse().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        let mut body = buf[header_end..].to_vec();
+        if code != 204 && content_length > body.len() {
+            let need = content_length - body.len();
+            let mut rest = vec![0u8; need];
+            stream.read_exact(&mut rest)?;
+            body.extend_from_slice(&rest);
+        }
+        body.truncate(content_length);
+        Ok((code, String::from_utf8_lossy(&body).trim().to_owned()))
     }
 
     /// Connect to `aos-guest` over Firecracker's host `virtio-vsock` UDS using 4-byte BE
@@ -670,15 +748,15 @@ mod tests {
         );
         let v = serde_json::to_value(&params).unwrap();
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 4);
+        assert_eq!(obj.len(), 3);
         assert_eq!(obj["mem_backend"]["backend_type"], "File");
-        assert_eq!(obj["track_dirty_pages"], false);
         assert_eq!(obj["resume_vm"], true);
-        // Must NOT emit v1.12+/v1.16+ fields on v1.10/v1.11.
+        // Must NOT emit v1.11+ `track_dirty_pages`, v1.12+ `network_overrides`, or v1.16+ `vsock_override`.
+        assert!(!obj.contains_key("track_dirty_pages"));
+        assert!(!obj.contains_key("enable_diff_snapshots"));
         assert!(!obj.contains_key("network_overrides"));
         assert!(!obj.contains_key("vsock_override"));
         assert!(!obj.contains_key("mem_file_path"));
-        assert!(!obj.contains_key("enable_diff_snapshots"));
     }
 
     #[test]

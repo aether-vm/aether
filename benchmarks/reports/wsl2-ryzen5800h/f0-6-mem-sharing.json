@@ -1,0 +1,193 @@
+{
+  "env": {
+    "argv": [
+      "./target/release/phase0-harness",
+      "--root",
+      "/var/lib/forkloom/phase0",
+      "--out",
+      "benchmarks/reports/wsl2-ryzen5800h",
+      "f0-6-mem-sharing",
+      "--firecracker-bin",
+      "/usr/local/bin/firecracker",
+      "--snapshot-path",
+      "/var/lib/forkloom/phase0/snaps/f05_f06/vmstate",
+      "--mem-file-path",
+      "/var/lib/forkloom/phase0/snaps/f05_f06/mem.img",
+      "--mother-api-sock",
+      "/var/lib/forkloom/phase0/snaps/f05_f06/mother.api.sock",
+      "--vm-mem-mib",
+      "512",
+      "--clones",
+      "4",
+      "--volatile-tmpfs-mib",
+      "640",
+      "--tmpfs-quota-mib",
+      "256",
+      "--capture-reps",
+      "3",
+      "--vsock-uds",
+      "./v.sock",
+      "--vsock-port",
+      "5000"
+    ],
+    "authority": "AdvisoryWsl2",
+    "authority_note": "WSL2 = nested virtualisation + loop devices on ext4-on-VHDX + host page cache beneath. Valid for functional/crash-semantics conclusions; latency/throughput numbers MUST NOT be published as baselines (docs/PHASE0_FALSIFICATION.md section 1).",
+    "boot_id": "b871cc91-4480-40a8-a01f-02468bae95b4",
+    "cached_mib_at_start": 1151,
+    "collected_at": "2026-11-23T11:26:20Z",
+    "cpu_model": "AMD Ryzen 7 5800H with Radeon Graphics",
+    "dirty_kib_at_start": 3360,
+    "euid": 0,
+    "host_declared": "Surface Pro 8, i5-1135G7, 16 GiB RAM (as declared in docs/PHASE0_FALSIFICATION.md section 1.1; not verifiable from inside WSL2)",
+    "is_wsl2": true,
+    "kernel_release": "6.18.58.1-microsoft-standard-WSL2",
+    "kernel_version_line": "Linux version 6.18.58.1-microsoft-standard-WSL2 (root@6869314ecc53) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Tue Oct 27 00:24:11 UTC 2026",
+    "kvm_present": true,
+    "logical_cpus": 8,
+    "mem_available_mib": 15190,
+    "mem_total_mib": 15995,
+    "pool_root": "/var/lib/forkloom/phase0",
+    "pool_root_fs": "ext2/3/4",
+    "power_state": "BAT1: status=Not charging online=unknown; AC1: status=unknown online=1",
+    "tools": [
+      [
+        "rustc",
+        "unavailable"
+      ],
+      [
+        "btrfs-progs",
+        "btrfs-progs v6.6.3"
+      ],
+      [
+        "xfsprogs (mkfs.xfs)",
+        "mkfs.xfs version 6.6.0"
+      ],
+      [
+        "e2fsprogs (mkfs.ext4)",
+        "mke2fs 1.47.0 (5-Feb-2023)"
+      ],
+      [
+        "git",
+        "git version 2.43.0"
+      ],
+      [
+        "losetup",
+        "losetup from util-linux 2.39.3"
+      ],
+      [
+        "firecracker",
+        "Firecracker v1.10.1"
+      ]
+    ]
+  },
+  "experiment": "F0-6",
+  "result": {
+    "clones": [
+      {
+        "clone_idx": 0,
+        "load_us": 3149.8619999999996,
+        "pid": 432,
+        "smaps": {
+          "anonymous_kib": 1332,
+          "private_clean_kib": 0,
+          "private_dirty_kib": 1344,
+          "pss_anon_kib": 1332,
+          "pss_file_kib": 3637,
+          "pss_kib": 4973,
+          "rss_kib": 16108,
+          "shared_clean_kib": 14764,
+          "shared_dirty_kib": 0,
+          "swap_pss_kib": 0
+        }
+      },
+      {
+        "clone_idx": 1,
+        "load_us": 2927.725,
+        "pid": 437,
+        "smaps": {
+          "anonymous_kib": 1332,
+          "private_clean_kib": 0,
+          "private_dirty_kib": 1344,
+          "pss_anon_kib": 1332,
+          "pss_file_kib": 3627,
+          "pss_kib": 4963,
+          "rss_kib": 16108,
+          "shared_clean_kib": 14764,
+          "shared_dirty_kib": 0,
+          "swap_pss_kib": 0
+        }
+      },
+      {
+        "clone_idx": 2,
+        "load_us": 3002.865,
+        "pid": 441,
+        "smaps": {
+          "anonymous_kib": 1332,
+          "private_clean_kib": 0,
+          "private_dirty_kib": 1344,
+          "pss_anon_kib": 1332,
+          "pss_file_kib": 3616,
+          "pss_kib": 4952,
+          "rss_kib": 16108,
+          "shared_clean_kib": 14764,
+          "shared_dirty_kib": 0,
+          "swap_pss_kib": 0
+        }
+      },
+      {
+        "clone_idx": 3,
+        "load_us": 2981.1870000000004,
+        "pid": 445,
+        "smaps": {
+          "anonymous_kib": 1248,
+          "private_clean_kib": 60,
+          "private_dirty_kib": 1260,
+          "pss_anon_kib": 1248,
+          "pss_file_kib": 3612,
+          "pss_kib": 4864,
+          "rss_kib": 15908,
+          "shared_clean_kib": 14588,
+          "shared_dirty_kib": 0,
+          "swap_pss_kib": 0
+        }
+      }
+    ],
+    "durable_capture": {
+      "max_us": 324151.207,
+      "mean_us": 234674.07166666666,
+      "min_us": 185388.954,
+      "n": 3,
+      "p50_us": 194482.05399999997,
+      "p90_us": 324151.207,
+      "p99_us": 324151.207
+    },
+    "passed": true,
+    "sharing": {
+      "clone_count": 4,
+      "dedup_factor": 3.2519238558120698,
+      "physical_savings_pct": 69.24897247477892,
+      "sharing_verified": true,
+      "sum_private_dirty_kib": 5292,
+      "sum_pss_kib": 19752,
+      "sum_rss_kib": 64232,
+      "sum_shared_clean_kib": 58880
+    },
+    "tmpfs_quota_probe": {
+      "attempted_mib": 288,
+      "detail": "hit ENOSPC cleanly after 256 MiB",
+      "graceful_enospc": true,
+      "oom_kill_delta": 0,
+      "quota_mib": 256
+    },
+    "vm_mem_mib": 512,
+    "volatile_capture": {
+      "max_us": 212902.444,
+      "mean_us": 209468.4243333333,
+      "min_us": 207523.762,
+      "n": 3,
+      "p50_us": 207979.06699999998,
+      "p90_us": 212902.444,
+      "p99_us": 212902.444
+    }
+  }
+}

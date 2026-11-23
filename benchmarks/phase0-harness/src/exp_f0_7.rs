@@ -58,6 +58,11 @@ pub struct Args {
     /// external socket RST after `PostForkReseed` (must emit JSON with `external_tcp_severed`,
     /// `external_sever_ms`, `loopback_pool_survived`, and optional `vmgenid_changed`).
     pub socket_probe_argv: Vec<String>,
+    /// Optional TAP device name baked into the mother snapshot (e.g. `tap-f07`). When set on
+    /// Linux, each clone runs in its own isolated `ip netns` (`fl-f07-c<idx>`) with a private
+    /// TAP device of this name so Firecracker v1.10/v1.11 clones never collide and receive no
+    /// host-side TCP RST interference.
+    pub netns_tap: Option<String>,
 }
 
 /// Returns `true` iff `ip` is a loopback address that MUST survive post-fork external socket kill
@@ -337,6 +342,29 @@ pub fn run(ctx: &crate::Ctx, args: &Args) -> Result<ExpOutput> {
         guest_exec_request, guest_post_fork_reseed_request, parse_guest_exec_result,
         parse_guest_reseed_ack, SnapshotLoadParams,
     };
+    use crate::util::{run as run_cmd, run_any};
+
+    struct NetnsGuard {
+        name: String,
+    }
+
+    impl NetnsGuard {
+        fn create_with_tap(name: String, tap: &str) -> Result<Self> {
+            let _ = run_any("ip", &["netns", "del", &name]);
+            run_cmd("ip", &["netns", "add", &name])?;
+            let guard = Self { name };
+            run_cmd("ip", &["-n", &guard.name, "link", "set", "lo", "up"])?;
+            run_cmd("ip", &["-n", &guard.name, "tuntap", "add", "dev", tap, "mode", "tap"])?;
+            run_cmd("ip", &["-n", &guard.name, "link", "set", tap, "up"])?;
+            Ok(guard)
+        }
+    }
+
+    impl Drop for NetnsGuard {
+        fn drop(&mut self) {
+            let _ = run_any("ip", &["netns", "del", &self.name]);
+        }
+    }
 
     ensure!(
         Path::new("/dev/kvm").exists(),
@@ -356,15 +384,24 @@ pub fn run(ctx: &crate::Ctx, args: &Args) -> Result<ExpOutput> {
     let timeout = Duration::from_millis(args.vsock_timeout_ms);
     let mut clones = Vec::with_capacity(args.clones);
     let mut guards = Vec::with_capacity(args.clones);
+    let mut netns_guards: Vec<NetnsGuard> = Vec::new();
 
     for idx in 0..args.clones {
         let clone_dir = work_root.join(format!("clone-{idx}"));
         std::fs::create_dir_all(&clone_dir)?;
         let api_sock = clone_dir.join("fc.api.sock");
-        let fc = FcProcess::spawn(
+        let ns_name = if let Some(tap) = &args.netns_tap {
+            let ns = format!("fl-f07-c{idx}");
+            netns_guards.push(NetnsGuard::create_with_tap(ns.clone(), tap)?);
+            Some(ns)
+        } else {
+            None
+        };
+        let fc = FcProcess::spawn_in_netns(
             &args.firecracker_bin,
             &api_sock,
             &clone_dir,
+            ns_name.as_deref(),
             Duration::from_secs(5),
         )?;
         let client = FcClient::new(&api_sock);
@@ -485,6 +522,7 @@ pub fn run(ctx: &crate::Ctx, args: &Args) -> Result<ExpOutput> {
         guards.push(fc);
     }
     drop(guards);
+    drop(netns_guards);
 
     Ok(build_report(args.entropy_bytes, args.max_sever_ms, clones))
 }

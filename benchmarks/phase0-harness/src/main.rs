@@ -166,6 +166,9 @@ enum Cmd {
         /// Optional guest socket probe argv (comma-separated) emitting JSON verification fields.
         #[arg(long, value_delimiter = ',')]
         socket_probe_argv: Vec<String>,
+        /// Optional TAP device name baked into mother snapshot; isolates each clone in its own `ip netns`.
+        #[arg(long)]
+        netns_tap: Option<String>,
     },
     /// F0-8: Multi-process kill -9 fault injection & aos-meta R0~R6 zero-orphan recovery.
     #[command(name = "f0-8-kill9-recovery", alias = "f0-8-killnine")]
@@ -473,6 +476,7 @@ fn run_linux_cmd(cli: &Cli, ctx: &Ctx, argv: Vec<String>) -> Result<ExitCode> {
             max_sever_ms,
             vsock_timeout_ms,
             socket_probe_argv,
+            netns_tap,
         } => exp_f0_7::run(
             ctx,
             &exp_f0_7::Args {
@@ -486,6 +490,7 @@ fn run_linux_cmd(cli: &Cli, ctx: &Ctx, argv: Vec<String>) -> Result<ExitCode> {
                 max_sever_ms: *max_sever_ms,
                 vsock_timeout_ms: *vsock_timeout_ms,
                 socket_probe_argv: socket_probe_argv.clone(),
+                netns_tap: netns_tap.clone(),
             },
         )?,
         Cmd::Env | Cmd::F08 { .. } | Cmd::F08Worker { .. } => unreachable!("handled above"),

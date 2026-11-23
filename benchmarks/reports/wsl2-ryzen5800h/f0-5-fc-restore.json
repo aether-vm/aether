@@ -1,0 +1,366 @@
+{
+  "env": {
+    "argv": [
+      "./target/release/phase0-harness",
+      "--root",
+      "/var/lib/forkloom/phase0",
+      "--out",
+      "benchmarks/reports/wsl2-ryzen5800h",
+      "f0-5-fc-restore",
+      "--firecracker-bin",
+      "/usr/local/bin/firecracker",
+      "--snapshot-path",
+      "/var/lib/forkloom/phase0/snaps/f05_f06/vmstate",
+      "--mem-file-path",
+      "/var/lib/forkloom/phase0/snaps/f05_f06/mem.img",
+      "--vsock-uds",
+      "./v.sock",
+      "--vsock-port",
+      "5000",
+      "--probe-argv",
+      "/bin/uname,-r",
+      "--vm-mem-mib",
+      "512",
+      "--reps",
+      "5"
+    ],
+    "authority": "AdvisoryWsl2",
+    "authority_note": "WSL2 = nested virtualisation + loop devices on ext4-on-VHDX + host page cache beneath. Valid for functional/crash-semantics conclusions; latency/throughput numbers MUST NOT be published as baselines (docs/PHASE0_FALSIFICATION.md section 1).",
+    "boot_id": "b871cc91-4480-40a8-a01f-02468bae95b4",
+    "cached_mib_at_start": 1152,
+    "collected_at": "2026-11-23T11:26:22Z",
+    "cpu_model": "AMD Ryzen 7 5800H with Radeon Graphics",
+    "dirty_kib_at_start": 3484,
+    "euid": 0,
+    "host_declared": "Surface Pro 8, i5-1135G7, 16 GiB RAM (as declared in docs/PHASE0_FALSIFICATION.md section 1.1; not verifiable from inside WSL2)",
+    "is_wsl2": true,
+    "kernel_release": "6.18.58.1-microsoft-standard-WSL2",
+    "kernel_version_line": "Linux version 6.18.58.1-microsoft-standard-WSL2 (root@6869314ecc53) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Tue Oct 27 00:24:11 UTC 2026",
+    "kvm_present": true,
+    "logical_cpus": 8,
+    "mem_available_mib": 15071,
+    "mem_total_mib": 15995,
+    "pool_root": "/var/lib/forkloom/phase0",
+    "pool_root_fs": "ext2/3/4",
+    "power_state": "BAT1: status=Not charging online=unknown; AC1: status=unknown online=1",
+    "tools": [
+      [
+        "rustc",
+        "unavailable"
+      ],
+      [
+        "btrfs-progs",
+        "btrfs-progs v6.6.3"
+      ],
+      [
+        "xfsprogs (mkfs.xfs)",
+        "mkfs.xfs version 6.6.0"
+      ],
+      [
+        "e2fsprogs (mkfs.ext4)",
+        "mke2fs 1.47.0 (5-Feb-2023)"
+      ],
+      [
+        "git",
+        "git version 2.43.0"
+      ],
+      [
+        "losetup",
+        "losetup from util-linux 2.39.3"
+      ],
+      [
+        "firecracker",
+        "Firecracker v1.10.1"
+      ]
+    ]
+  },
+  "experiment": "F0-5",
+  "result": {
+    "mincore_profile": {
+      "extents": [
+        {
+          "len": 8388608,
+          "offset": 0
+        },
+        {
+          "len": 28987392,
+          "offset": 13156352
+        },
+        {
+          "len": 22130688,
+          "offset": 42557440
+        },
+        {
+          "len": 16662528,
+          "offset": 520208384
+        }
+      ],
+      "file_bytes": 536870912,
+      "page_size": 4096,
+      "resident_pages": 18596,
+      "resident_ratio": 0.141876220703125,
+      "total_pages": 131072
+    },
+    "page_fault_penalty_ratio": 2.118001596120346,
+    "reps": 5,
+    "samples": [
+      {
+        "api_load_us": 22449.236,
+        "fadvise_prewarm_us": 0.0,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 0,
+        "tier": "cold_cache",
+        "total_with_prewarm_us": 92876.291,
+        "vsock_ready_us": 92876.04100000001
+      },
+      {
+        "api_load_us": 22720.873,
+        "fadvise_prewarm_us": 0.0,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 1,
+        "tier": "cold_cache",
+        "total_with_prewarm_us": 90801.808,
+        "vsock_ready_us": 90801.658
+      },
+      {
+        "api_load_us": 23043.296000000002,
+        "fadvise_prewarm_us": 0.0,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 2,
+        "tier": "cold_cache",
+        "total_with_prewarm_us": 90694.412,
+        "vsock_ready_us": 90694.132
+      },
+      {
+        "api_load_us": 21506.816000000003,
+        "fadvise_prewarm_us": 0.0,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 3,
+        "tier": "cold_cache",
+        "total_with_prewarm_us": 90012.60699999999,
+        "vsock_ready_us": 90012.337
+      },
+      {
+        "api_load_us": 22270.797,
+        "fadvise_prewarm_us": 0.0,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 4,
+        "tier": "cold_cache",
+        "total_with_prewarm_us": 93734.53700000001,
+        "vsock_ready_us": 93734.336
+      },
+      {
+        "api_load_us": 2391.176,
+        "fadvise_prewarm_us": 0.0,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 0,
+        "tier": "hot_cache",
+        "total_with_prewarm_us": 42583.949,
+        "vsock_ready_us": 42583.668
+      },
+      {
+        "api_load_us": 2204.636,
+        "fadvise_prewarm_us": 0.0,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 1,
+        "tier": "hot_cache",
+        "total_with_prewarm_us": 43257.126,
+        "vsock_ready_us": 43256.926
+      },
+      {
+        "api_load_us": 2264.7819999999997,
+        "fadvise_prewarm_us": 0.0,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 2,
+        "tier": "hot_cache",
+        "total_with_prewarm_us": 41059.373,
+        "vsock_ready_us": 41059.113000000005
+      },
+      {
+        "api_load_us": 2487.206,
+        "fadvise_prewarm_us": 0.0,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 3,
+        "tier": "hot_cache",
+        "total_with_prewarm_us": 43691.106999999996,
+        "vsock_ready_us": 43690.856
+      },
+      {
+        "api_load_us": 2319.997,
+        "fadvise_prewarm_us": 0.0,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 4,
+        "tier": "hot_cache",
+        "total_with_prewarm_us": 42871.454000000005,
+        "vsock_ready_us": 42871.224
+      },
+      {
+        "api_load_us": 10456.109,
+        "fadvise_prewarm_us": 11140.158000000001,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 0,
+        "tier": "mincore_willneed",
+        "total_with_prewarm_us": 82625.693,
+        "vsock_ready_us": 71484.954
+      },
+      {
+        "api_load_us": 11812.045,
+        "fadvise_prewarm_us": 15218.705,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 1,
+        "tier": "mincore_willneed",
+        "total_with_prewarm_us": 96034.164,
+        "vsock_ready_us": 80814.859
+      },
+      {
+        "api_load_us": 10840.784,
+        "fadvise_prewarm_us": 11791.446,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 2,
+        "tier": "mincore_willneed",
+        "total_with_prewarm_us": 83369.54100000001,
+        "vsock_ready_us": 71577.113
+      },
+      {
+        "api_load_us": 10811.498,
+        "fadvise_prewarm_us": 12165.976,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 3,
+        "tier": "mincore_willneed",
+        "total_with_prewarm_us": 88709.223,
+        "vsock_ready_us": 76542.204
+      },
+      {
+        "api_load_us": 11447.48,
+        "fadvise_prewarm_us": 10953.385,
+        "guest_reply": "exec(exit=0,stdout=\"6.6.87\")",
+        "rep": 4,
+        "tier": "mincore_willneed",
+        "total_with_prewarm_us": 81289.42,
+        "vsock_ready_us": 70335.29400000001
+      }
+    ],
+    "tiers": [
+      {
+        "api_load": {
+          "max_us": 23043.296000000002,
+          "mean_us": 22398.2036,
+          "min_us": 21506.816000000003,
+          "n": 5,
+          "p50_us": 22449.236,
+          "p90_us": 23043.296000000002,
+          "p99_us": 23043.296000000002
+        },
+        "fadvise_prewarm": {
+          "max_us": 0.0,
+          "mean_us": 0.0,
+          "min_us": 0.0,
+          "n": 5,
+          "p50_us": 0.0,
+          "p90_us": 0.0,
+          "p99_us": 0.0
+        },
+        "tier": "cold_cache",
+        "total_with_prewarm": {
+          "max_us": 93734.53700000001,
+          "mean_us": 91623.93100000001,
+          "min_us": 90012.60699999999,
+          "n": 5,
+          "p50_us": 90801.808,
+          "p90_us": 93734.53700000001,
+          "p99_us": 93734.53700000001
+        },
+        "vsock_ready": {
+          "max_us": 93734.336,
+          "mean_us": 91623.7008,
+          "min_us": 90012.337,
+          "n": 5,
+          "p50_us": 90801.658,
+          "p90_us": 93734.336,
+          "p99_us": 93734.336
+        }
+      },
+      {
+        "api_load": {
+          "max_us": 2487.206,
+          "mean_us": 2333.5593999999996,
+          "min_us": 2204.636,
+          "n": 5,
+          "p50_us": 2319.997,
+          "p90_us": 2487.206,
+          "p99_us": 2487.206
+        },
+        "fadvise_prewarm": {
+          "max_us": 0.0,
+          "mean_us": 0.0,
+          "min_us": 0.0,
+          "n": 5,
+          "p50_us": 0.0,
+          "p90_us": 0.0,
+          "p99_us": 0.0
+        },
+        "tier": "hot_cache",
+        "total_with_prewarm": {
+          "max_us": 43691.106999999996,
+          "mean_us": 42692.6018,
+          "min_us": 41059.373,
+          "n": 5,
+          "p50_us": 42871.454000000005,
+          "p90_us": 43691.106999999996,
+          "p99_us": 43691.106999999996
+        },
+        "vsock_ready": {
+          "max_us": 43690.856,
+          "mean_us": 42692.3574,
+          "min_us": 41059.113000000005,
+          "n": 5,
+          "p50_us": 42871.224,
+          "p90_us": 43690.856,
+          "p99_us": 43690.856
+        }
+      },
+      {
+        "api_load": {
+          "max_us": 11812.045,
+          "mean_us": 11073.5832,
+          "min_us": 10456.109,
+          "n": 5,
+          "p50_us": 10840.784,
+          "p90_us": 11812.045,
+          "p99_us": 11812.045
+        },
+        "fadvise_prewarm": {
+          "max_us": 15218.705,
+          "mean_us": 12253.934000000001,
+          "min_us": 10953.385,
+          "n": 5,
+          "p50_us": 11791.446,
+          "p90_us": 15218.705,
+          "p99_us": 15218.705
+        },
+        "tier": "mincore_willneed",
+        "total_with_prewarm": {
+          "max_us": 96034.164,
+          "mean_us": 86405.6082,
+          "min_us": 81289.42,
+          "n": 5,
+          "p50_us": 83369.54100000001,
+          "p90_us": 96034.164,
+          "p99_us": 96034.164
+        },
+        "vsock_ready": {
+          "max_us": 80814.859,
+          "mean_us": 74150.88480000001,
+          "min_us": 70335.29400000001,
+          "n": 5,
+          "p50_us": 71577.113,
+          "p90_us": 80814.859,
+          "p99_us": 80814.859
+        }
+      }
+    ],
+    "vm_mem_mib": 512,
+    "willneed_restore_only_speedup_ratio": 1.26858508529116,
+    "willneed_speedup_ratio": 1.0891484697031018
+  }
+}
