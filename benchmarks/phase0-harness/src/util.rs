@@ -1,5 +1,6 @@
 //! Misc helpers: command execution, PRNG, time formatting, filesystem probes.
 
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -104,48 +105,60 @@ pub fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
     (v, t0.elapsed())
 }
 
-/// `true` when running as euid 0.
+/// `true` when running as euid 0 (Linux only).
+#[cfg(target_os = "linux")]
 #[must_use]
 pub fn is_root() -> bool {
     nix::unistd::geteuid().is_root()
 }
 
-/// `sync(2)` then drop clean page cache, dentries and inodes (needs root).
+/// `sync(2)` then drop clean page cache, dentries and inodes (needs root, Linux only).
+#[cfg(target_os = "linux")]
 pub fn drop_caches() -> Result<()> {
     nix::unistd::sync();
     std::fs::write("/proc/sys/vm/drop_caches", b"3\n").context("write /proc/sys/vm/drop_caches")
 }
 
-/// Bytes available to unprivileged users on the filesystem holding `path`.
+/// Bytes available to unprivileged users on the filesystem holding `path` (Linux only).
+#[cfg(target_os = "linux")]
 pub fn avail_bytes(path: &Path) -> Result<u64> {
     let s = nix::sys::statvfs::statvfs(path).with_context(|| format!("statvfs {}", path.display()))?;
     Ok(s.blocks_available() as u64 * s.fragment_size() as u64)
 }
 
-/// Total bytes of the filesystem holding `path`.
+/// Total bytes of the filesystem holding `path` (Linux only).
+#[cfg(target_os = "linux")]
 pub fn total_bytes(path: &Path) -> Result<u64> {
     let s = nix::sys::statvfs::statvfs(path).with_context(|| format!("statvfs {}", path.display()))?;
     Ok(s.blocks() as u64 * s.fragment_size() as u64)
 }
 
-/// `Dirty:` value of `/proc/meminfo` in KiB (0 if unreadable).
+/// `Dirty:` value of `/proc/meminfo` in KiB (0 if unreadable or non-Linux).
 #[must_use]
 pub fn dirty_kib() -> u64 {
     meminfo_kib("Dirty:")
 }
 
-/// Look up a `/proc/meminfo` key (including the colon) in KiB (0 if absent).
+/// Look up a `/proc/meminfo` key (including the colon) in KiB (0 if absent or non-Linux).
 #[must_use]
 pub fn meminfo_kib(key: &str) -> u64 {
-    std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|s| {
-            s.lines().find_map(|l| {
-                l.strip_prefix(key)
-                    .and_then(|r| r.trim().trim_end_matches("kB").trim().parse().ok())
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|s| {
+                s.lines().find_map(|l| {
+                    l.strip_prefix(key)
+                        .and_then(|r| r.trim().trim_end_matches("kB").trim().parse().ok())
+                })
             })
-        })
-        .unwrap_or(0)
+            .unwrap_or(0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = key;
+        0
+    }
 }
 
 /// Current wall clock as Unix seconds.

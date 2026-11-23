@@ -281,8 +281,8 @@ mod raw {
     use super::*;
 
     ioctl_write_int!(ficlone, 0x94, 9);
-    ioctl_read_bad!(fs_getflags, 0x8008_6601, c_int);
-    ioctl_write_ptr_bad!(fs_setflags, 0x4008_6602, c_int);
+    ioctl_read_bad!(fs_getflags, 0x8008_6601u32 as nix::sys::ioctl::ioctl_num_type, c_int);
+    ioctl_write_ptr_bad!(fs_setflags, 0x4008_6602u32 as nix::sys::ioctl::ioctl_num_type, c_int);
     ioctl_read!(fs_fsgetxattr, b'X', 31, FsXattr);
     ioctl_readwrite!(fs_fiemap, b'f', 11, FiemapHeader);
     ioctl_readwrite!(btrfs_tree_search, 0x94, 17, BtrfsIoctlSearchArgs);

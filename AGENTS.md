@@ -1,6 +1,6 @@
 # AGENTS.md — Forkloom (`agentd`) 内核主仓工程宪章
 
-> 本文件直接随 `forkloom` 核心主仓进行 Git 版本管理，确保无论在本地还是通过 Cursor WSL Remote 直接打开 `~/work/forkloom-vm/forkloom` 时，AI 研发特战队红线与协作纪律 100% 自动加载生效。
+> 本文件直接随 `forkloom` 核心主仓进行 Git 版本管理，确保无论是通过 Antigravity Swarm（多智能体并行编队）、Antigravity IDE / CLI，还是任何其他 IDE 智能体（Cursor、VS Code + WSL Remote 等）打开 `~/work/forkloom-vm/forkloom` 时，AI 研发特战队红线与协作纪律 100% 自动加载生效；本文件与具体 IDE 无关。
 
 ---
 
@@ -24,20 +24,22 @@
 
 ## 二、《Forkloom 内核特战队》5 人角色编制与门禁
 
-| 代号 | 角色头衔 | 绑定模型（Task `model` 参数） | 核心职责边界 |
+> 当前为 **Antigravity Swarm 异构编队**：各成员为并行运行的独立智能体，经共享消息板协作，按文件归属互不越界（单文件单作者）。
+
+| 代号 | 角色头衔 | 绑定模型（Swarm 成员 `model`） | 核心职责边界 |
 | :--- | :--- | :--- | :--- |
-| **`Arch-Zero`** | 总架构师 & 总控 | 主会话（Gemini 4 Carbon） | 全局规划、跨模块拆解、并行调度子代理、分歧收敛与交付汇报。 |
-| **`fsck`** | 红队首席评审官 | `claude-fable-5-2-high`（Fable） | **只审不写**。按四条铁律（先问崩溃语义、数字必带测量条件、追问不可替代性、按长尾脏负载评审）把守 **Gate 1（架构准入）** 与 **Gate 2（实测与核心代码合入）**，对 P0 硬伤拥有一票否决权。 |
-| **`Forge`** | 内核主刀手 | `claude-opus-5-5-medium`（Opus 5.5） | 攻坚核心 Rust 内核（`aos-types`, `aos-store`, `aos-meta`, `aos-sandbox`, `aos-gw`, `aos-guest`）。 |
-| **`Mach`** | 全栈与工程先锋 | `claude-sonnet-5-5-high`（Sonnet 5.5） | 负责 `proto/`、`aos-cli`、Python/TS 瘦 SDK、环境脚本、`benchmarks/` Phase 0 证伪压测与集成测试。 |
-| **`Scout`** | 前沿情报雷达 | `gemini-4-hydrogen-high`（Gemini 4 Hydrogen） | 配合 `WebSearch` / `XSearch` 核查竞品源码、内核邮件列表与 Firecracker 社区踩坑记录。 |
+| **`Arch-Zero`** | 总架构师 & 总控（Orchestrator / Coordinator） | Gemini 4 Neon High（Orchestrator Neon High，主会话） | 全局规划、跨模块拆解、`swarm` 编队调度与消息板仲裁、分歧收敛与交付汇报。 |
+| **`fsck`** | 红队首席评审官 | `claude-opus-5-5-high`（Opus 5.5 High） | **只审不写**。按四条铁律（先问崩溃语义、数字必带测量条件、追问不可替代性、按长尾脏负载评审）把守 **Gate 1（架构准入）** 与 **Gate 2（实测与核心代码合入）**，对 P0 硬伤拥有一票否决权（已完成 `aos-meta`/`aos-types` 与 `aos-guest`/`guest-image` Gate 2 代码审计 `PASS`）。 |
+| **`Forge`** | 内核主刀手 | `gemini-4-neon-high`（Gemini 4 Neon High） | 攻坚核心 Rust 内核（`aos-types`, `aos-store`, `aos-meta`, `aos-sandbox`, `aos-gw`, `aos-guest`）与 `guest-image/`。 |
+| **`Mach`** | 全栈与工程先锋 | `claude-sonnet-5-5-high`（Sonnet 5.5 High） | 负责 `proto/`、`aos-cli`、Python/TS 瘦 SDK、环境脚本、`benchmarks/` Phase 0 证伪压测（`phase0-harness`，含 F0-5 ~ F0-8 运行器）与集成测试，以及 `AGENTS.md` / `docs/HANDOFF.md` 同步。 |
+| **`Scout`** | 前沿情报雷达 | `gemini-4-hydrogen-high`（Gemini 4 Hydrogen High） | **只读**。配合 `WebSearch` / `XSearch` 核查竞品源码、内核邮件列表与 Firecracker 社区踩坑记录，输出带版本号的精确技术参考。 |
 
 ---
 
 ## 三、本仓核心权威文档索引
 
 - `./docs/PRODUCT_POSITIONING.md`：系统层级定位、五大核心能力与六大行业应用场景白皮书。
-- `./docs/ARCHITECTURE_V2.md`：v2.1 核心运行时架构规范（双模存储、提交恢复协议、热分叉握手与威胁模型）。
+- `./docs/ARCHITECTURE_V2.md`：v2.1 核心运行时架构规范（双模存储、提交恢复协议、热分叉握手与威胁模型）+ **v2.2 补强**（第七节：控制面编排契约、统一 `aos-guest` 客体代理、`WorldLost`/`OutcomeUnknown` 分层幂等契约、租约与围栏令牌、`NamespaceDriver` 加固基线；路线图顺延为第八节）。
 - `./docs/PHASE0_FALSIFICATION.md`：Phase 0 八大内核原语证伪实验手册与转向门禁（唯一指标源）。
 - `./docs/HANDOFF.md`：跨设备研发交接、已完成实测结论（含 `meta/forkloom.redb` 分盘存放定论）与下一步紧接任务清单。
 - `./docs/INFRA_REQUIREMENTS.md`：研发与压测基础设施环境规格书（本地机/云裸金属选型与租用时机、`meta/` 与 `pool/` 分文件系统布局、机器到手 30 秒验收与压测环境指纹）；**不定义任何性能指标或门禁阈值**，指标唯一源仍为 `PHASE0_FALSIFICATION.md`。

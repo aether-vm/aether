@@ -69,6 +69,12 @@ version = "0.1.0-alpha.0"
 [[package]]
 name = "aos-guest"
 version = "0.1.0-alpha.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "aos-gw"
@@ -80,6 +86,7 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "aos-types",
  "getrandom",
+ "nix",
  "redb",
  "serde",
  "serde_json",
@@ -235,8 +242,10 @@ name = "phase0-harness"
 version = "0.1.0-alpha.0"
 dependencies = [
  "anyhow",
+ "aos-meta",
  "aos-types",
  "clap",
+ "getrandom",
  "libc",
  "nix",
  "redb",

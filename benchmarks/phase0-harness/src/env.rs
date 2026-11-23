@@ -67,6 +67,7 @@ pub struct EnvHeader {
     pub argv: Vec<String>,
 }
 
+#[cfg(target_os = "linux")]
 fn fs_name(path: &Path) -> String {
     match nix::sys::statfs::statfs(path) {
         Ok(s) => {
@@ -85,8 +86,23 @@ fn fs_name(path: &Path) -> String {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn fs_name(_path: &Path) -> String {
+    format!("non-linux ({})", std::env::consts::OS)
+}
+
 fn read_trim(path: &str) -> String {
     std::fs::read_to_string(path).map(|s| s.trim().to_owned()).unwrap_or_else(|_| "unknown".into())
+}
+
+#[cfg(target_os = "linux")]
+fn current_euid() -> u32 {
+    nix::unistd::geteuid().as_raw()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_euid() -> u32 {
+    0
 }
 
 fn power_state() -> String {
@@ -121,7 +137,14 @@ impl EnvHeader {
             .find_map(|l| l.strip_prefix("model name"))
             .and_then(|r| r.split(':').nth(1))
             .map_or_else(|| "unknown".into(), |s| s.trim().to_owned());
-        let logical_cpus = cpuinfo.lines().filter(|l| l.starts_with("processor")).count();
+        let logical_cpus = {
+            let from_proc = cpuinfo.lines().filter(|l| l.starts_with("processor")).count();
+            if from_proc > 0 {
+                from_proc
+            } else {
+                std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+            }
+        };
         let (authority, authority_note) = if is_wsl2 {
             (
                 Authority::AdvisoryWsl2,
@@ -164,7 +187,7 @@ impl EnvHeader {
             dirty_kib_at_start: dirty_kib(),
             cached_mib_at_start: meminfo_kib("Cached:") / 1024,
             boot_id,
-            euid: nix::unistd::geteuid().as_raw(),
+            euid: current_euid(),
             kvm_present: Path::new("/dev/kvm").exists(),
             pool_root: pool_root.display().to_string(),
             pool_root_fs: fs_name(pool_root.parent().filter(|_| !pool_root.exists()).unwrap_or(pool_root)),
@@ -211,8 +234,9 @@ mod tests {
 
     #[test]
     fn collect_never_panics_and_classifies_wsl() {
-        let h = EnvHeader::collect(Path::new("/tmp"), vec!["x".into()]);
+        let h = EnvHeader::collect(&std::env::temp_dir(), vec!["x".into()]);
         assert!(h.logical_cpus >= 1);
+        #[cfg(target_os = "linux")]
         assert!(h.mem_total_mib > 0);
         assert_eq!(h.authority == Authority::AdvisoryWsl2, h.is_wsl2);
         let md = h.to_markdown();
