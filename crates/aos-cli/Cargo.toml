@@ -1,6 +1,6 @@
 [package]
 name = "aos-cli"
-description = "aos: Aether CLI. Placeholder."
+description = "aos: Forkloom CLI. Placeholder."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

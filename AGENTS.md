@@ -1,13 +1,13 @@
-# AGENTS.md — Aether (`agentd`) 内核主仓工程宪章
+# AGENTS.md — Forkloom (`agentd`) 内核主仓工程宪章
 
-> 本文件直接随 `aether` 核心主仓进行 Git 版本管理，确保无论在本地还是通过 Cursor WSL Remote 直接打开 `~/work/aether-vm/aether` 时，AI 研发特战队红线与协作纪律 100% 自动加载生效。
+> 本文件直接随 `forkloom` 核心主仓进行 Git 版本管理，确保无论在本地还是通过 Cursor WSL Remote 直接打开 `~/work/forkloom-vm/forkloom` 时，AI 研发特战队红线与协作纪律 100% 自动加载生效。
 
 ---
 
 ## 一、五条不可逾越的内核工程红线
 
 1. **WSL2 / Linux 原生路径与磁盘封顶铁律**：
-   - 所有内核编译、存储池挂载与沙箱实验**必须在原生 Linux 文件系统（如 WSL2 `~/work/aether-vm/aether` 与 `/var/lib/aether/`）内执行**，严禁在 `/mnt/c`（9p 挂载盘）运行。
+   - 所有内核编译、存储池挂载与沙箱实验**必须在原生 Linux 文件系统（如 WSL2 `~/work/forkloom-vm/forkloom` 与 `/var/lib/forkloom/`）内执行**，严禁在 `/mnt/c`（9p 挂载盘）运行。
    - 在 WSL2 下实验存储池镜像大小必须按宿主机物理剩余空间严格封顶（`<= 16 GiB`），严禁轻信 WSL 虚拟磁盘显示的 950G；WSL2 嵌套虚拟化跑出的延迟数字**严禁作为正式性能指标对外发布**。
 2. **严控单机范围**：`v1.0` 打穿单机高密度运行时之前，冻结自研 `FUSE`、冻结多节点分布式集群控制面、不引入 `CRIU`、不自研源码三路合并引擎（交由 `git`）、不引入 `napi-rs` 跨平台二进制矩阵。
 3. **类型安全双模存储与零宿主挂载不可信镜像**：
@@ -22,7 +22,7 @@
 
 ---
 
-## 二、《Aether 内核特战队》5 人角色编制与门禁
+## 二、《Forkloom 内核特战队》5 人角色编制与门禁
 
 | 代号 | 角色头衔 | 绑定模型（Task `model` 参数） | 核心职责边界 |
 | :--- | :--- | :--- | :--- |
@@ -39,5 +39,5 @@
 - `./docs/PRODUCT_POSITIONING.md`：系统层级定位、五大核心能力与六大行业应用场景白皮书。
 - `./docs/ARCHITECTURE_V2.md`：v2.1 核心运行时架构规范（双模存储、提交恢复协议、热分叉握手与威胁模型）。
 - `./docs/PHASE0_FALSIFICATION.md`：Phase 0 八大内核原语证伪实验手册与转向门禁（唯一指标源）。
-- `./docs/HANDOFF.md`：跨设备研发交接、已完成实测结论（含 `meta/aether.redb` 分盘存放定论）与下一步紧接任务清单。
+- `./docs/HANDOFF.md`：跨设备研发交接、已完成实测结论（含 `meta/forkloom.redb` 分盘存放定论）与下一步紧接任务清单。
 - `./docs/INFRA_REQUIREMENTS.md`：研发与压测基础设施环境规格书（本地机/云裸金属选型与租用时机、`meta/` 与 `pool/` 分文件系统布局、机器到手 30 秒验收与压测环境指纹）；**不定义任何性能指标或门禁阈值**，指标唯一源仍为 `PHASE0_FALSIFICATION.md`。

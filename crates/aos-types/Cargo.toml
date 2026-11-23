@@ -1,6 +1,6 @@
 [package]
 name = "aos-types"
-description = "Aether foundational types: IDs, boot-bound proofs, untrusted-input wrapper and patch path validator (zero unsafe)."
+description = "Forkloom foundational types: IDs, boot-bound proofs, untrusted-input wrapper and patch path validator (zero unsafe)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// File name of the metadata database inside `meta_dir`.
-pub const DB_FILE_NAME: &str = "aether.redb";
+pub const DB_FILE_NAME: &str = "forkloom.redb";
 /// Pool identity file inside `pool_root`.
 pub const POOL_UUID_FILE: &str = "POOL_UUID";
 /// Process lock file inside `pool_root`.
@@ -19,11 +19,11 @@ const DAY_MS: u64 = 24 * 3600 * 1000;
 
 /// Engine configuration.
 ///
-/// `meta_dir` (holding `aether.redb`) must live on a host `ext4`/`XFS` filesystem **outside**
+/// `meta_dir` (holding `forkloom.redb`) must live on a host `ext4`/`XFS` filesystem **outside**
 /// the Btrfs pool at `pool_root` (`POOL_UUID`, `objects/`, `quarantine/`).
 #[derive(Debug, Clone)]
 pub struct MetaConfig {
-    /// Directory holding `aether.redb`.
+    /// Directory holding `forkloom.redb`.
     pub meta_dir: PathBuf,
     /// Pool root.
     pub pool_root: PathBuf,
@@ -74,7 +74,7 @@ impl MetaConfig {
         }
     }
 
-    /// `meta_dir/aether.redb`.
+    /// `meta_dir/forkloom.redb`.
     #[must_use]
     pub fn db_path(&self) -> PathBuf {
         self.meta_dir.join(DB_FILE_NAME)

@@ -1,4 +1,4 @@
-//! Aether foundational types (`aos-types`).
+//! Forkloom foundational types (`aos-types`).
 //!
 //! Everything in this crate is `#![forbid(unsafe_code)]`.
 //!

@@ -17,8 +17,8 @@ version = "0.1.0-alpha.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.89"
-repository = "https://github.com/aether-vm/aether"
-homepage = "https://github.com/aether-vm"
+repository = "https://github.com/forkloom-vm/forkloom"
+homepage = "https://github.com/forkloom-vm"
 
 [workspace.dependencies]
 anyhow = "1"

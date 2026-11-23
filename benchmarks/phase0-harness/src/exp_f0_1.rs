@@ -1,7 +1,7 @@
 //! F0-1: Btrfs concurrent subvolume snapshot / destroy throughput, with `redb` commit latency
 //! measured on the **same pool** (and on the host ext4 as control) while a random-write load runs.
 //!
-//! Pivot gate: if same-pool `redb` commit P99 > 50 ms during snapshot churn, `meta/aether.redb`
+//! Pivot gate: if same-pool `redb` commit P99 > 50 ms during snapshot churn, `meta/forkloom.redb`
 //! must move off the Btrfs pool.
 
 use std::fs::{File, OpenOptions};
@@ -159,8 +159,8 @@ pub fn run(ctx: &Ctx, a: &Args) -> Result<ExpOutput> {
     let load_ops = Arc::new(AtomicU64::new(0));
     let interval = Duration::from_millis(a.commit_interval_ms);
     let h_load = load_thread(mnt.join("load/rand.dat"), a.load_mib * MIB, stop.clone(), ctx.seed, load_ops.clone());
-    let h_pool = redb_thread(mnt.join("meta/aether.redb"), stop.clone(), phase.clone(), interval);
-    let h_host = redb_thread(host_meta_dir.join("aether.redb"), stop.clone(), phase.clone(), interval);
+    let h_pool = redb_thread(mnt.join("meta/forkloom.redb"), stop.clone(), phase.clone(), interval);
+    let h_host = redb_thread(host_meta_dir.join("forkloom.redb"), stop.clone(), phase.clone(), interval);
 
     // Phase 0: baseline (load + redb only)
     thread::sleep(Duration::from_secs(a.baseline_secs));
@@ -240,7 +240,7 @@ pub fn run(ctx: &Ctx, a: &Args) -> Result<ExpOutput> {
     let verdict = if pivot {
         format!(
             "**PIVOT TRIGGERED (advisory, WSL2)**: same-pool redb commit P99 reached {worst_pool_p99_ms:.1} ms (> 50 ms) \
-             during snapshot churn -> `meta/aether.redb` must live outside the Btrfs data pool."
+             during snapshot churn -> `meta/forkloom.redb` must live outside the Btrfs data pool."
         )
     } else {
         format!(

@@ -1,7 +1,7 @@
-# Aether (`agentd`) 核心运行时架构与研发规划书（v2.1 · Gate 1 修订定稿）
+# Forkloom (`agentd`) 核心运行时架构与研发规划书（v2.1 · Gate 1 修订定稿）
 
 > **文档状态**：Architecture & Roadmap Specification **v2.1**（已闭环首轮三大结构性硬伤，并合入红队 `fsck` Gate 1 复审全部强制修订项 A1~A7）  
-> **所属仓库**：`aether-vm/aether`（核心主仓）  
+> **所属仓库**：`forkloom-vm/forkloom`（核心主仓）  
 > **系统定位**：运行在 Linux 内核之上的单机高密度有状态沙箱与整机运行态分叉运行时（Stateful Sandbox & VM Forking Runtime）
 
 ---
@@ -23,7 +23,7 @@
 
 基于公开文档、源码仓库与社区 Issue 核查（基准：2026 年）：
 
-| 竞品 | 底层隔离与存储架构 | 已核实的架构边界与局限 | `Aether` 的差异化切入点 |
+| 竞品 | 底层隔离与存储架构 | 已核实的架构边界与局限 | `Forkloom` 的差异化切入点 |
 | :--- | :--- | :--- | :--- |
 | **Morph Cloud** (`Infinibranch`) | 闭源 `MorphVM` + 闭源存算分离 `MorphFS` | 核心运行时完全闭源，不支持私有化单机自托管；公开文档未披露出网凭证防反射机制与冷热边界条件。 | **Apache-2.0 开源单机自托管运行时**，面向科研实验室与企业内网自有裸金属大内存服务器零外部重依赖部署。 |
 | **Fly.io Sprites** | Firecracker + 自研 `SBD`（S3 over NBD + `ext4`，见 `fly.io/blog/sprites-block-device`） | 官方 Checkpoints 文档写明**仅保存磁盘层、不含运行态内存与进程**（恢复需重启 VM）；公开 API/CLI 缺失从快照 `fork` 的原生接口（见 Fly Community `#27838`）。 | 原生提供 **`fork(N)` 整机运行态热分叉**（同步捕获内存与块设备），保留已预热进程与 Guest 内本地回环连接。 |
@@ -82,9 +82,9 @@ flowchart TB
 ## 三、`aos-store`：双模类型安全存储引擎
 
 ### 3.1 存储池布局与默认属性（合入 `fsck` 审查修正）
-在 `/var/lib/aether/pool` 挂载独立 **Btrfs 存储池**（备选 `XFS reflink` 作为纯块模式后端）：
+在 `/var/lib/forkloom/pool` 挂载独立 **Btrfs 存储池**（备选 `XFS reflink` 作为纯块模式后端）：
 - **块镜像默认保留 Btrfs CoW 与数据校验和**：不使用全局镜像 `NOCOW`（因为 `NOCOW` 文件一旦执行 `FICLONE` 共享，首次覆盖写依然触发 CoW，却永久丧失数据块校验和）；具体 extent 碎片对 `FICLONE` 耗时的影响由 Phase 0 实测数据裁决是否切换 `XFS` 块后端。
-- **`meta/` 分盘存放（以 `HANDOFF.md` Phase 0 实测转向定论为准）**：`aether.redb` **存放于 Btrfs 数据池之外**的独立宿主机 `ext4/XFS` 目录（如 `/var/lib/aether/meta/aether.redb`），**不再放入 `/var/lib/aether/pool/` Btrfs 池内**（F0-1 实测同池快照全局事务使 `redb` 提交 P99 显著升高；F0-4 实测池写满 `ENOSPC` 时同池删除事务 100% 失败）。`meta/` 目录**严禁**对其创建子卷快照或 reflink；其所在宿主文件系统若为 `ext4/XFS` 则无需 `NOCOW` 处理，池内 `pool/` 仅存放受管对象与 `quarantine/`。
+- **`meta/` 分盘存放（以 `HANDOFF.md` Phase 0 实测转向定论为准）**：`forkloom.redb` **存放于 Btrfs 数据池之外**的独立宿主机 `ext4/XFS` 目录（如 `/var/lib/forkloom/meta/forkloom.redb`），**不再放入 `/var/lib/forkloom/pool/` Btrfs 池内**（F0-1 实测同池快照全局事务使 `redb` 提交 P99 显著升高；F0-4 实测池写满 `ENOSPC` 时同池删除事务 100% 失败）。`meta/` 目录**严禁**对其创建子卷快照或 reflink；其所在宿主文件系统若为 `ext4/XFS` 则无需 `NOCOW` 处理，池内 `pool/` 仅存放受管对象与 `quarantine/`。
 - **防死锁压舱石与池护栏**：启动时强制检查禁用 `qgroups` 与 `autodefrag`；预分配 `ballast` 压舱文件（生产 `2GiB`，WSL2 小池按比例配置），并在 Phase 0 验证池满释放压舱文件后 `redb` 删除事务可正常提交。
 
 ### 3.2 OCI 镜像与本地目录的不可变导入
@@ -124,11 +124,11 @@ pub struct Ephemeral<T> { inner: T, boot_id: u128 }
 4. **I4 崩溃恢复铁律（唯回滚原则）**：启动恢复时，**任何状态不是 `Committed`（即处于 `Preparing`）的帧无条件回滚销毁**，绝不尝试猜测稀疏内存文件完整性做前滚。
 
 ### 4.2 安全启动恢复与防误删孤儿隔离（R0 ~ R9，修正 A1 / A5 / A7）
-1. **R0 池防呆与空库保护（A5）**：获取 `pool/.lock`（校验池与外置 `meta/` 的 `POOL_UUID` 配对）；**若池 `objects/` 目录非空而独立宿主机 `meta/aether.redb`（位于 Btrfs 池之外，如 `/var/lib/aether/meta/aether.redb`）缺失或损坏无法打开，立即拒绝启动并报警**（严禁自动初始化新空库后触发孤儿清扫误删全池数据！）；校验 `POOL_UUID` 一致。
+1. **R0 池防呆与空库保护（A5）**：获取 `pool/.lock`（校验池与外置 `meta/` 的 `POOL_UUID` 配对）；**若池 `objects/` 目录非空而独立宿主机 `meta/forkloom.redb`（位于 Btrfs 池之外，如 `/var/lib/forkloom/meta/forkloom.redb`）缺失或损坏无法打开，立即拒绝启动并报警**（严禁自动初始化新空库后触发孤儿清扫误删全池数据！）；校验 `POOL_UUID` 一致。
 2. **R1 纪元递增与跨重启 `Volatile` 失效（A1）**：读取宿主 `/proc/sys/kernel/random/boot_id`；`daemon_epoch += 1` 写入 `redb`。若检测到 `boot_id` 与上一纪元不同，立即将所有 `Volatile` 状态的 `Committed` 帧批量置为 `Expired`，移除其全部 `Hold` 并排队回收其磁盘克隆文件。
 3. **R2 旧纪元进程与网关围栏清剿（A7）**：
    - **网关纪元围栏**：首先连接 `aos-gw` 下发新 `daemon_epoch`，强制 `aos-gw` 立即作废所有 `< current_epoch` 的 `(slot, world, epoch)` 凭证绑定并清空对应连接状态，收到确认后方继续；
-   - **进程树全歼**：所有沙箱与 `jailer` 子进程在创建时均通过 `clone3(CLONE_INTO_CGROUP)` 直接放入 `/sys/fs/cgroup/aether.slice/epoch-<e>/w-<id>`，恢复时对旧纪元 cgroup 写入 `cgroup.kill` 确保零漏网进程；回收网络槽位并执行 `conntrack -D` 清空残留连接跟踪表；将旧纪元活动 `World` 置为 `Lost`。
+   - **进程树全歼**：所有沙箱与 `jailer` 子进程在创建时均通过 `clone3(CLONE_INTO_CGROUP)` 直接放入 `/sys/fs/cgroup/forkloom.slice/epoch-<e>/w-<id>`，恢复时对旧纪元 cgroup 写入 `cgroup.kill` 确保零漏网进程；回收网络槽位并执行 `conntrack -D` 清空残留连接跟踪表；将旧纪元活动 `World` 置为 `Lost`。
 4. **R3~R5 确定性清理**：回滚全部 `Preparing` 帧，续完所有 `Deleting` 帧的物理删除。
 5. **R6 带隔离区与熔断阈值的孤儿回收（A5）**：扫描 `objects/` 中不在活跃集合内的受管命名对象——**若孤儿对象数量超过安全阈值（如 > 50 个或占池总对象 > 10%），立即中止自动清理并拒绝启动，提示人工核查是否误恢复了旧版 `redb` 备份**；阈值内的少量崩溃孤儿先 `rename` 移入 `pool/quarantine/<epoch>/` 保留宽限期（如 24 小时）后再异步物理销毁。
 
@@ -204,7 +204,7 @@ pub struct Ephemeral<T> { inner: T, boot_id: u128 }
 - **Phase 0（第 1 ~ 4 周）：内核原语证伪与基线实测**  
   执行独立手册 `./PHASE0_FALSIFICATION.md` 定义的全部证伪实验（WSL2 测功能正确性，云端裸金属 KVM 测真实延迟基线）。若 Btrfs 块镜像碎片导致 `FICLONE` 暂停超标，立即按预案将 `BlockStore` 切至独立 `XFS reflink` 后端。
 - **Phase 1（第 2 ~ 6 个月）：冷分叉闭环与 MVP v0.1 开源发布**  
-  交付 `aos-meta`、`TreeStore`（OCI 与本地 tar 导入 + Btrfs 子卷冷分叉 + 安全补丁导出）、`NamespaceDriver`、基础白名单网关、`agentd`、`aos` CLI 及 Python/TS 瘦 SDK；跑通真实 **SWE-bench** 并发评测基准并激活 `aether-mcp` / `aether-recipes` 卫星仓。
+  交付 `aos-meta`、`TreeStore`（OCI 与本地 tar 导入 + Btrfs 子卷冷分叉 + 安全补丁导出）、`NamespaceDriver`、基础白名单网关、`agentd`、`aos` CLI 及 Python/TS 瘦 SDK；跑通真实 **SWE-bench** 并发评测基准并激活 `forkloom-mcp` / `forkloom-recipes` 卫星仓。
 - **Phase 2（第 7 ~ 13 个月）：Firecracker 整机热分叉引擎 v0.5**  
   交付 `BlockStore`、网络槽位池、`FirecrackerDriver`、`aos-guest` 重播种握手、Working-set 预取器、`Volatile/Durable` 分级帧与 `Inspector VM` 安全补丁提取器；通过万次分叉销毁无泄漏与随机 `kill -9` 故障注入烤机。
 - **Phase 3（第 14 ~ 18 个月）：完整三层凭证网关 `aos-gw`、加密审计与 v1.0 生产定型**  

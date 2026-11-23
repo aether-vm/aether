@@ -10,7 +10,7 @@
 ### 1.1 本地功能与崩溃语义验证台（当前开发机）
 - **宿主硬件**：Surface Pro 8（i5-1135G7 8 逻辑核，16GB RAM，C 盘物理剩余 ~56GB）
 - **WSL2 环境**：Ubuntu 22.04.5 LTS，内核 `6.6.87.2-microsoft-standard-WSL2`（建议 `.wslconfig` 分配 `8GB` 内存）
-- **物理空间安全红线**：实验 Btrfs / XFS 存储池文件或独立 VHDX 容量**严格限制在 `12 GiB` 以内**（严禁信任 WSL2 虚拟盘显示的 950G，防止写爆宿主机 C 盘引发底层 I/O 错误）；代码与池必须位于 WSL 原生路径 `~/work/aether-vm/` 与 `/var/lib/aether/`，严禁触碰 `/mnt/c`。
+- **物理空间安全红线**：实验 Btrfs / XFS 存储池文件或独立 VHDX 容量**严格限制在 `12 GiB` 以内**（严禁信任 WSL2 虚拟盘显示的 950G，防止写爆宿主机 C 盘引发底层 I/O 错误）；代码与池必须位于 WSL 原生路径 `~/work/forkloom-vm/` 与 `/var/lib/forkloom/`，严禁触碰 `/mnt/c`。
 
 ### 1.2 性能延迟基准台（待接入裸金属 / 支持 KVM 的独立 Linux 服务器）
 - **推荐配置**：x86_64 裸金属（≥ 16 核 / 64GB~128GB RAM / 独立 NVMe SSD 分区），Ubuntu 24.04 LTS（Linux ≥ 6.8）。
@@ -30,7 +30,7 @@
 
 | 编号 | 实验名称 | 具体测试负载与测量边界条件 | 证伪/转向判据（Pivot / Kill Criteria） |
 | :--- | :--- | :--- | :--- |
-| **F0-1** | **Btrfs 并发子卷快照与删除吞吐** | 在持续后台随机写负载 + 同池 `redb` `fsync` 并发竞争下，连续创建并异步销毁 1,000 个只读/可写子卷（确认禁用 `qgroups`），记录 P50/P99 延迟。 | 若同池 Btrfs 快照全局事务阻塞导致 `redb` 提交 P99 > `50ms`，则将 `meta/aether.redb` 移出 Btrfs 池放到宿主原生 `ext4/XFS` 目录。 |
+| **F0-1** | **Btrfs 并发子卷快照与删除吞吐** | 在持续后台随机写负载 + 同池 `redb` `fsync` 并发竞争下，连续创建并异步销毁 1,000 个只读/可写子卷（确认禁用 `qgroups`），记录 P50/P99 延迟。 | 若同池 Btrfs 快照全局事务阻塞导致 `redb` 提交 P99 > `50ms`，则将 `meta/forkloom.redb` 移出 Btrfs 池放到宿主原生 `ext4/XFS` 目录。 |
 | **F0-2** | **块镜像碎片与脏页下的 `FICLONE` 暂停耗时对比** | 对比三组后端：① Btrfs 默认 CoW 稀疏 `ext4` 镜像；② Btrfs `chattr +C` 镜像；③ **XFS (`reflink=1` + `cowextsize`) 对照组**。分别在 `1k / 10k / 100k` 个随机写 extent 及不同宿主页缓存脏页量（`0MB / 256MB / 1GB`）下测量 `FICLONE + fsync` 耗时。 | **核心转向门禁**：若 Btrfs CoW 块镜像在 `50k` extent 下单次克隆耗时 > `100ms` 而 XFS 显著更稳，则 `BlockStore` 正式切为独立 XFS 后端。 |
 | **F0-3** | **5 万小文件免挂载导入与分叉后 `git status` 行为** | 构造含 5 万文件（大型 `node_modules` + Git 仓库）的目录树：① 在一致 `userns` 下测试解包 + `mkfs.ext4 -d` 物化耗时与 UID 正确性；② 子卷分叉后实测首次 `git status` 是否因 `st_dev/ctime` 触发全盘重哈希。 | 验证物化耗时线性系数与 UID 零偏移；若 `git status` 触发全扫，记录需要在导入阶段预刷 Git index 的工程对策。 |
 | **F0-4** | **池满（`ENOSPC`）死锁与压舱石恢复演练** | 将 Btrfs 池人为写至 `ENOSPC`，验证：① 此时 `meta/` 下的 `redb` 能否提交删除状态事务；② 删除 `ballast` 压舱文件后，子卷销毁与空间回收是否 100% 恢复正常。 | 若池满导致同池 `redb` 无法提交墓碑事务，则强制规定 `meta/` 必须与数据池分盘存放。 |

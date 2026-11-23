@@ -182,7 +182,7 @@ pub fn run(ctx: &Ctx, a: &Args) -> Result<ExpOutput> {
 
     // meta/ with an open redb (as agentd would keep it)
     std::fs::create_dir_all(mnt.join("meta"))?;
-    let db_path = mnt.join("meta/aether.redb");
+    let db_path = mnt.join("meta/forkloom.redb");
     let db = Database::create(&db_path)?;
     {
         let w = db.begin_write()?;

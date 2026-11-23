@@ -1,4 +1,4 @@
-//! aos: Aether CLI. Placeholder.
+//! aos: Forkloom CLI. Placeholder.
 
 #![forbid(unsafe_code)]
 

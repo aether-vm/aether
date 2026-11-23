@@ -1,4 +1,4 @@
-//! Aether Phase 0 falsification harness (Linux only).
+//! Forkloom Phase 0 falsification harness (Linux only).
 //!
 //! WARNING: numbers produced under WSL2 (nested virtualisation, ext4-on-VHDX backing store, loop
 //! devices on top of it) are **advisory only** - they validate functional correctness and crash /
@@ -23,7 +23,7 @@ use std::path::PathBuf;
 /// Shared context handed to every experiment.
 #[derive(Debug, Clone)]
 pub struct Ctx {
-    /// Pool root directory (default `/var/lib/aether/phase0`).
+    /// Pool root directory (default `/var/lib/forkloom/phase0`).
     pub root: PathBuf,
     /// Report output directory.
     pub out: PathBuf,

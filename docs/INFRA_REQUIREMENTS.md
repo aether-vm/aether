@@ -1,4 +1,4 @@
-# Aether 研发与压测基础设施环境规格书（Infrastructure & Testbed Requirements）
+# Forkloom 研发与压测基础设施环境规格书（Infrastructure & Testbed Requirements）
 
 > **文档定位**：回答"创始人该找什么机器、什么时候租什么服务器、机器到手怎么 30 秒验收"。本文**不定义任何性能指标或门禁阈值**，指标与转向门禁的唯一权威源仍是 [`PHASE0_FALSIFICATION.md`](./PHASE0_FALSIFICATION.md)。  
 > **对齐来源**：`PHASE0_FALSIFICATION.md`（F0-1 ~ F0-8、双轨基线、红队铁律 2）、`ARCHITECTURE_V2.md`（v2.1 存储池布局 / 热快照顺序 / 恢复协议）、`HANDOFF.md`（已实测结论与环境恢复步骤）、`AGENTS.md`（五条工程红线）、`README.md`（仓库布局、`guest-image/` 内核约束）。  
@@ -11,7 +11,7 @@
 | # | 差异点 | 本文处理方式 |
 | :--- | :--- | :--- |
 | 1 | `PHASE0_FALSIFICATION.md` §1.1 记录的本地机为 Surface Pro 8（i5-1135G7 / C 盘剩余 ~56GB）；创始人当前实际可用主机为 **i5-9400 6C/6T、16GB RAM、`C:` 仅剩 ~7.5GB**。 | A2 章节按**当前实际主机**编写（更严苛）。`PHASE0_FALSIFICATION.md` §1.1 待创始人确认后另行同步，本文不改动该唯一指标源。 |
-| 2 | `ARCHITECTURE_V2.md` §3.1 / §4.2 仍以 `pool/` 下的 `meta/` 描述 `redb`；`HANDOFF.md` §二（F0-1 实测 P99 `55.2 ms`、F0-4 同池墓碑事务 100% 失败）已定论 **`aether.redb` 必须放在 Btrfs 池之外的独立 `ext4/XFS`**。 | 本文一律按 `HANDOFF.md` 定论：`/var/lib/aether/meta`（`ext4/XFS`）与 `/var/lib/aether/pool`（Btrfs）**分文件系统**。架构书措辞待 Gate 2 后由 `Arch-Zero` 统一修订。 |
+| 2 | `ARCHITECTURE_V2.md` §3.1 / §4.2 仍以 `pool/` 下的 `meta/` 描述 `redb`；`HANDOFF.md` §二（F0-1 实测 P99 `55.2 ms`、F0-4 同池墓碑事务 100% 失败）已定论 **`forkloom.redb` 必须放在 Btrfs 池之外的独立 `ext4/XFS`**。 | 本文一律按 `HANDOFF.md` 定论：`/var/lib/forkloom/meta`（`ext4/XFS`）与 `/var/lib/forkloom/pool`（Btrfs）**分文件系统**。架构书措辞待 Gate 2 后由 `Arch-Zero` 统一修订。 |
 | 3 | `HANDOFF.md` 记录 F0-2 在 WSL2 上 `btrfs-cow` 优于默认 `xfs-reflink`，但明确"待裸金属二次复核绝对延迟"。 | Track B Stage 1 **必须预留 XFS（`reflink=1`）对照分区**，不得因 WSL2 结论省略。 |
 | 4 | Phase 0 手册要求 WSL2 存储池 `<= 12 GiB`，`AGENTS.md` 红线 1 写 `<= 16 GiB`。 | 取默认 **12 GiB**、绝对上限 **16 GiB**（两者不冲突，取更严者为默认）。 |
 
@@ -65,13 +65,13 @@
 
 ```bash
 # 主力机（Windows PowerShell 或 WSL）：生成密钥并分发到 Linux 机器
-ssh-keygen -t ed25519 -C "aether-founder"
+ssh-keygen -t ed25519 -C "forkloom-founder"
 ssh-copy-id <user>@<固定IP>          # Windows 无 ssh-copy-id 时手工追加公钥到 ~/.ssh/authorized_keys
 
 # Linux 被控机：开启 SSH，授予 sudo 免密（仅限该专用测试机！）
 sudo apt-get install -y openssh-server && sudo systemctl enable --now ssh
-echo "<user> ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-aether-dev
-sudo chmod 0440 /etc/sudoers.d/90-aether-dev && sudo visudo -c
+echo "<user> ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-forkloom-dev
+sudo chmod 0440 /etc/sudoers.d/90-forkloom-dev && sudo visudo -c
 ```
 
 > 安全提示：`NOPASSWD:ALL` 与 `disk` 组（`HANDOFF.md` 要求）等同于 root 权限，**仅限不存放敏感数据的专用测试机**；Track B 云机用完即毁，不要复用个人密钥之外的任何凭据。
@@ -88,7 +88,7 @@ sudo chmod 0440 /etc/sudoers.d/90-aether-dev && sudo visudo -c
 | 系统盘 | **`C:` 仅剩 ~7.5GB** | **严禁将 WSL2 发行版 / VHDX / 存储池放在 C 盘**。必须放 `E:\wsl\` 或 `D:\wsl\`。 |
 | WSL 发行版位置 | — | 新装：`wsl --import Ubuntu-24.04 E:\wsl\Ubuntu-24.04 <rootfs.tar>`；已装在 C 盘的发行版：`wsl --manage <发行版> --move E:\wsl\<目录>`（WSL ≥ 2.3），或 `wsl --export` + `--import` 迁移后 `--unregister` 原发行版。 |
 | `.wslconfig`（`C:\Users\<用户>\.wslconfig`，文件很小可留 C 盘） | — | `memory=8GB`、`processors=6`、`nestedVirtualization=true`；改完 `wsl --shutdown`。 |
-| 存储池封顶 | WSL 虚拟盘会显示 ~950G | **默认 `12 GiB`，绝对上限 `16 GiB`**（Phase 0 手册 / `AGENTS.md`）；池文件放 WSL 原生路径 `/var/lib/aether/`，**严禁触碰 `/mnt/c`、`/mnt/e`**；`ballast` 按池大小比例缩小（生产为 `2GiB`）。 |
+| 存储池封顶 | WSL 虚拟盘会显示 ~950G | **默认 `12 GiB`，绝对上限 `16 GiB`**（Phase 0 手册 / `AGENTS.md`）；池文件放 WSL 原生路径 `/var/lib/forkloom/`，**严禁触碰 `/mnt/c`、`/mnt/e`**；`ballast` 按池大小比例缩小（生产为 `2GiB`）。 |
 | 可跑规格 | — | **`256MiB ~ 512MiB × 4` 个克隆**的功能验证；`2GiB` 规格仅限单实例冒烟，不跑多克隆。 |
 | 数字使用规则 | — | 报告必须写明 `WSL2 L2 nested`；**严禁将延迟数字作为正式指标发布**，仅可用于相对对比与功能结论。 |
 | 内核 | `6.6.x-microsoft-standard-WSL2`（Phase 0 手册记录值） | 低于 Track A1 / B 的 `6.8` 要求，属已知差异，已在铁律 2 标注范围内。 |
@@ -97,8 +97,8 @@ sudo chmod 0440 /etc/sudoers.d/90-aether-dev && sudo visudo -c
 
 **铁律**（`HANDOFF.md` 定论 + `AGENTS.md` 红线 3/4）：
 
-1. **`/var/lib/aether/meta/`（含 `aether.redb`、加密审计 `audit/`）** 必须位于**宿主原生 `ext4` 或 `XFS`**；
-2. **`/var/lib/aether/pool/`** 为**独立 Btrfs 存储池**（`TreeStore` 子卷 + `BlockStore` 稀疏块镜像 `FICLONE`），**不得与 `meta/` 同一文件系统**；
+1. **`/var/lib/forkloom/meta/`（含 `forkloom.redb`、加密审计 `audit/`）** 必须位于**宿主原生 `ext4` 或 `XFS`**；
+2. **`/var/lib/forkloom/pool/`** 为**独立 Btrfs 存储池**（`TreeStore` 子卷 + `BlockStore` 稀疏块镜像 `FICLONE`），**不得与 `meta/` 同一文件系统**；
 3. Btrfs 池**禁用 `qgroups` 与 `autodefrag`**；块镜像**不设全局 `NOCOW`**（保留 CoW 与校验和）；预分配 `ballast` 压舱文件（生产 `2GiB`）；
 4. `Volatile Frame` 的内存镜像放独立配额 `tmpfs`（`size=` 硬封顶，超限返回 `ResourceExhausted` 而非触发宿主 OOM）。
 
@@ -115,36 +115,36 @@ sudo chmod 0440 /etc/sudoers.d/90-aether-dev && sudo visudo -c
 | 分区 | 大小 | 文件系统 | 挂载点 | 用途 |
 | :--- | :--- | :--- | :--- | :--- |
 | `p1` | 1 GiB | FAT32 | `/boot/efi` | UEFI |
-| `p2` | ~120 GiB | `ext4` | `/`，含 `/var/lib/aether/meta` | 系统、`aether.redb`、审计日志 |
-| `p3` | ~250 GiB | **Btrfs**（`mkfs.btrfs -L aether-pool`） | `/var/lib/aether/pool` | 存储池 |
-| `p4` | ~100 GiB | XFS（`mkfs.xfs -m reflink=1`） | `/var/lib/aether-xfs-ctl` | F0-2 对照组 |
+| `p2` | ~120 GiB | `ext4` | `/`，含 `/var/lib/forkloom/meta` | 系统、`forkloom.redb`、审计日志 |
+| `p3` | ~250 GiB | **Btrfs**（`mkfs.btrfs -L forkloom-pool`） | `/var/lib/forkloom/pool` | 存储池 |
+| `p4` | ~100 GiB | XFS（`mkfs.xfs -m reflink=1`） | `/var/lib/forkloom-xfs-ctl` | F0-2 对照组 |
 | 余量 | ≥ 10% 不分区 | — | — | SSD 过量预留，降低稳态写放大 |
 
 ```bash
 # ===== L1/L2：独立分区（示例设备名 /dev/nvme0n1p3 / p4，务必先 lsblk 核对！以下命令破坏性） =====
-sudo mkfs.btrfs -f -L aether-pool /dev/nvme0n1p3
-sudo mkfs.xfs  -f -m reflink=1 -L aether-xfsctl /dev/nvme0n1p4
-sudo mkdir -p /var/lib/aether/{meta,pool,volatile} /var/lib/aether-xfs-ctl
+sudo mkfs.btrfs -f -L forkloom-pool /dev/nvme0n1p3
+sudo mkfs.xfs  -f -m reflink=1 -L forkloom-xfs /dev/nvme0n1p4
+sudo mkdir -p /var/lib/forkloom/{meta,pool,volatile} /var/lib/forkloom-xfs-ctl
 # 用 UUID 写入 fstab（noatime；不加 autodefrag；不启用 qgroups）
-echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme0n1p3) /var/lib/aether/pool btrfs noatime 0 0" | sudo tee -a /etc/fstab
-echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme0n1p4) /var/lib/aether-xfs-ctl xfs noatime 0 0" | sudo tee -a /etc/fstab
+echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme0n1p3) /var/lib/forkloom/pool btrfs noatime 0 0" | sudo tee -a /etc/fstab
+echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme0n1p4) /var/lib/forkloom-xfs-ctl xfs noatime 0 0" | sudo tee -a /etc/fstab
 sudo mount -a
 
 # ===== L3：Loop 文件池（WSL2 / 无空闲分区时；WSL2 严格 <= 12~16GiB） =====
-sudo mkdir -p /var/lib/aether/{meta,pool,volatile} /var/lib/aether/img
-sudo truncate -s 12G /var/lib/aether/img/pool.img        # WSL2 默认 12G，上限 16G
-sudo mkfs.btrfs -f -L aether-pool /var/lib/aether/img/pool.img
-sudo mount -o loop,noatime /var/lib/aether/img/pool.img /var/lib/aether/pool
+sudo mkdir -p /var/lib/forkloom/{meta,pool,volatile} /var/lib/forkloom/img
+sudo truncate -s 12G /var/lib/forkloom/img/pool.img        # WSL2 默认 12G，上限 16G
+sudo mkfs.btrfs -f -L forkloom-pool /var/lib/forkloom/img/pool.img
+sudo mount -o loop,noatime /var/lib/forkloom/img/pool.img /var/lib/forkloom/pool
 # 注意：pool.img 与 meta/ 虽同在根盘 ext4，但 pool 内部是独立 Btrfs 文件系统，
 #       满足"meta 与 pool 分文件系统"的功能语义；性能数字仍不可发布。
 
 # ===== 通用：Volatile tmpfs 硬配额（A1: 4G / A2: 2G / Track B Stage 1: 16G） =====
-sudo mount -t tmpfs -o size=4G,mode=0700 tmpfs /var/lib/aether/volatile
+sudo mount -t tmpfs -o size=4G,mode=0700 tmpfs /var/lib/forkloom/volatile
 
 # ===== 通用：确认池护栏（只读） =====
-findmnt -no FSTYPE,OPTIONS -T /var/lib/aether/pool    # 期望 btrfs，且 OPTIONS 不含 autodefrag
-findmnt -no FSTYPE -T /var/lib/aether/meta            # 期望 ext4 或 xfs
-sudo btrfs qgroup show /var/lib/aether/pool 2>&1 | head -n1   # 期望 "quotas not enabled" 类提示
+findmnt -no FSTYPE,OPTIONS -T /var/lib/forkloom/pool    # 期望 btrfs，且 OPTIONS 不含 autodefrag
+findmnt -no FSTYPE -T /var/lib/forkloom/meta            # 期望 ext4 或 xfs
+sudo btrfs qgroup show /var/lib/forkloom/pool 2>&1 | head -n1   # 期望 "quotas not enabled" 类提示
 ```
 
 > **全新 SSD 稳态预处理（Track B 必做，Track A1 推荐）**：对**不含数据**的新盘先 `sudo blkdiscard /dev/nvmeXn1`（**破坏性**）再分区，并在正式采集前对池区预写 / `fstrim`，避免"空盘虚高"。每次采集前的页缓存状态（`drop_caches` 冷 / 全热 / `WILLNEED` 预热）按 Phase 0 手册 F0-5 要求显式记录。
@@ -179,10 +179,10 @@ sudo btrfs qgroup show /var/lib/aether/pool 2>&1 | head -n1   # 期望 "quotas n
 
 | 盘 / 分区 | 文件系统 | 挂载点 | 内容 | 设计意图 |
 | :--- | :--- | :--- | :--- | :--- |
-| **NVMe-0（或分区 1）** | `ext4` 或 `XFS` | `/`（系统）与 `/var/lib/aether/meta` | `aether.redb`、加密审计日志 `audit/`（不含池内对象） | `redb` `fsync` 与池快照事务**物理隔离**，复核 F0-1 的 P99 门禁（`> 50ms` 即转向）。 |
-| **NVMe-1（或分区 2，≥ 250 GB）** | **原生裸分区 `Btrfs`**（**不用 loop 文件层**） | `/var/lib/aether/pool` | `TreeStore` 子卷、`BlockStore` 块镜像 | 去掉 loop 层开销，测出真实 NVMe 物理极限；禁 `qgroups`、`autodefrag`。 |
-| **NVMe-1 预留小分区（≥ 100 GB）** | `XFS`（`mkfs.xfs -m reflink=1`，必要时调 `cowextsize`） | `/var/lib/aether-xfs-ctl` | F0-2 对照组 | 在**同一块盘**上与 Btrfs 对比 `FICLONE + fsync`，排除盘间差异。 |
-| **内存盘** | `tmpfs`，`size=16G` | `/var/lib/aether/volatile` | `Volatile Frame` 内存镜像 | 实测配额耗尽时返回 `ResourceExhausted` 而不触发宿主 OOM；与 `16 GiB` 配额实验口径一致。 |
+| **NVMe-0（或分区 1）** | `ext4` 或 `XFS` | `/`（系统）与 `/var/lib/forkloom/meta` | `forkloom.redb`、加密审计日志 `audit/`（不含池内对象） | `redb` `fsync` 与池快照事务**物理隔离**，复核 F0-1 的 P99 门禁（`> 50ms` 即转向）。 |
+| **NVMe-1（或分区 2，≥ 250 GB）** | **原生裸分区 `Btrfs`**（**不用 loop 文件层**） | `/var/lib/forkloom/pool` | `TreeStore` 子卷、`BlockStore` 块镜像 | 去掉 loop 层开销，测出真实 NVMe 物理极限；禁 `qgroups`、`autodefrag`。 |
+| **NVMe-1 预留小分区（≥ 100 GB）** | `XFS`（`mkfs.xfs -m reflink=1`，必要时调 `cowextsize`） | `/var/lib/forkloom-xfs-ctl` | F0-2 对照组 | 在**同一块盘**上与 Btrfs 对比 `FICLONE + fsync`，排除盘间差异。 |
+| **内存盘** | `tmpfs`，`size=16G` | `/var/lib/forkloom/volatile` | `Volatile Frame` 内存镜像 | 实测配额耗尽时返回 `ResourceExhausted` 而不触发宿主 OOM；与 `16 GiB` 配额实验口径一致。 |
 
 **Stage 1 内存推算**：`2 GiB × 16` 路克隆并发恢复（即便 `MAP_PRIVATE` 共享，**冷缓存与脏页峰值**仍需余量）+ `16 GiB` `tmpfs` + 冷/热页缓存对比 + 宿主与工具链开销 ⇒ **最低 64 GB，推荐 128 GB ECC**。
 
@@ -229,7 +229,7 @@ sudo btrfs qgroup show /var/lib/aether/pool 2>&1 | head -n1   # 期望 "quotas n
 
 ```bash
 #!/usr/bin/env bash
-# aether-host-setup.sh —— Aether 研发 / 压测宿主机一键初始化（需 sudo；非只读）
+# forkloom-host-setup.sh —— Forkloom 研发 / 压测宿主机一键初始化（需 sudo；非只读）
 set -euo pipefail
 FC_VER="${FC_VER:-v1.10.1}"                    # 锁定 Firecracker >= v1.10.1
 ARCH="$(uname -m)"; [ "$ARCH" = "x86_64" ] || { echo "仅支持 x86_64"; exit 1; }
@@ -247,7 +247,7 @@ sudo apt-get install -y \
 CPU_KVM="kvm_intel"; grep -qw svm /proc/cpuinfo && CPU_KVM="kvm_amd"
 MODS="kvm $CPU_KVM vhost_vsock vsock btrfs tun nf_tables nf_conntrack veth"
 for m in $MODS; do sudo modprobe "$m" || echo "WARN: 模块 $m 加载失败（WSL2 / 精简内核可能内置或缺失）"; done
-printf '%s\n' $MODS | sudo tee /etc/modules-load.d/aether.conf >/dev/null
+printf '%s\n' $MODS | sudo tee /etc/modules-load.d/forkloom.conf >/dev/null
 # 说明：Firecracker 自身的 vsock 经 UDS 多路复用，并不依赖 vhost_vsock；
 #       加载它是为对齐项目验收清单并便于对照调试，缺失在 §5 脚本中仅为 WARN。
 
@@ -339,15 +339,15 @@ sha256sum vmlinux .config      # 记录摘要：快照元数据须绑定 Guest �
 
 ```bash
 #!/usr/bin/env bash
-# aether-readiness.sh —— 只读自检。用法：TRACK=A|B bash aether-readiness.sh
+# forkloom-readiness.sh —— 只读自检。用法：TRACK=A|B bash forkloom-readiness.sh
 TRACK="${TRACK:-A}"
-POOL="${AETHER_POOL:-/var/lib/aether/pool}"; META="${AETHER_META:-/var/lib/aether/meta}"
+POOL="${FORKLOOM_POOL:-/var/lib/forkloom/pool}"; META="${FORKLOOM_META:-/var/lib/forkloom/meta}"
 P=0; W=0; F=0
 ok(){ printf '[OK]   %s\n' "$*"; P=$((P+1)); }
 warn(){ printf '[WARN] %s\n' "$*"; W=$((W+1)); }
 fail(){ printf '[FAIL] %s\n' "$*"; F=$((F+1)); }
 ver_ge(){ [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }   # ver_ge A B  =>  A >= B
-echo "== Aether Readiness | TRACK=$TRACK | host=$(hostname) | $(date -Is) =="
+echo "== Forkloom Readiness | TRACK=$TRACK | host=$(hostname) | $(date -Is) =="
 
 # 1) 架构
 [ "$(uname -m)" = "x86_64" ] && ok "架构 x86_64" || fail "架构 $(uname -m)（Phase 0 基线锁定 x86_64）"
@@ -412,7 +412,7 @@ else
 fi
 
 # 8) 磁盘：目标路径可用空间、NVMe、meta/pool 分盘铁律
-tgt=""; for d in "$POOL" "$META" /var/lib/aether /var/lib /; do [ -d "$d" ] && { tgt="$d"; break; }; done
+tgt=""; for d in "$POOL" "$META" /var/lib/forkloom /var/lib /; do [ -d "$d" ] && { tgt="$d"; break; }; done
 free="$(df -BG --output=avail "$tgt" | tail -n1 | tr -dc 0-9)"
 if [ "$TRACK" = B ]; then lo=200; rec=400; else lo=40; rec=150; fi
 [ "$free" -ge "$rec" ] && ok "可用空间 ${free} GiB @ $tgt" || { [ "$free" -ge "$lo" ] && warn "可用空间 ${free} GiB @ $tgt（建议 >= ${rec}）" || fail "可用空间仅 ${free} GiB @ $tgt（< ${lo}）"; }
@@ -459,7 +459,7 @@ exit $([ "$F" -eq 0 ] && echo 0 || echo 1)
 ```bash
 #!/usr/bin/env bash
 # env-fingerprint.sh —— 采集"硬件型号 / 内核 / 文件系统 / 供电 / 页缓存"前提
-POOL="${AETHER_POOL:-/var/lib/aether/pool}"; META="${AETHER_META:-/var/lib/aether/meta}"
+POOL="${FORKLOOM_POOL:-/var/lib/forkloom/pool}"; META="${FORKLOOM_META:-/var/lib/forkloom/meta}"
 echo "## time:        $(date -Is)"
 echo "## host:        $(hostname)  virt=$(systemd-detect-virt 2>/dev/null || echo unknown)"
 echo "## cpu:         $(lscpu | awk -F: '/Model name/{gsub(/^ +/,"",$2);print $2}')  cores=$(nproc)  governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo n/a)"
@@ -468,7 +468,7 @@ echo "## mem:         $(awk '/MemTotal/{printf "%.1f GiB",$2/1048576}' /proc/mem
 echo "## kernel:      $(uname -r)   os=$(. /etc/os-release; echo $PRETTY_NAME)"
 echo "## firecracker: $(firecracker --version 2>/dev/null | head -n1)   jailer: $(jailer --version 2>/dev/null | head -n1)"
 echo "## guest-kernel sha256: $(sha256sum "${GUEST_VMLINUX:-/dev/null}" 2>/dev/null | cut -c1-16)"
-for p in "$META" "$POOL" /var/lib/aether/volatile; do
+for p in "$META" "$POOL" /var/lib/forkloom/volatile; do
   [ -e "$p" ] && echo "## fs[$p]: $(findmnt -no SOURCE,FSTYPE,OPTIONS -T "$p")"
 done
 echo "## vm.dirty_ratio=$(sysctl -n vm.dirty_ratio) dirty_background_ratio=$(sysctl -n vm.dirty_background_ratio)"

@@ -1,6 +1,6 @@
 [package]
 name = "phase0-harness"
-description = "Aether Phase 0 falsification suite (Linux only): F0-1..F0-8 kernel-primitive experiments."
+description = "Forkloom Phase 0 falsification suite (Linux only): F0-1..F0-8 kernel-primitive experiments."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

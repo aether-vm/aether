@@ -50,7 +50,7 @@ pub fn validate_root(root: &Path) -> Result<()> {
     ensure!(root.is_absolute(), "pool root must be absolute: {}", root.display());
     ensure!(
         !root.starts_with("/mnt"),
-        "refusing pool root {} under /mnt (WSL2 9p/DrvFs): use a native Linux path such as /var/lib/aether/phase0",
+        "refusing pool root {} under /mnt (WSL2 9p/DrvFs): use a native Linux path such as /var/lib/forkloom/phase0",
         root.display()
     );
     std::fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;

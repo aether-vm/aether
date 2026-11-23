@@ -1,4 +1,4 @@
-//! Aether metadata engine (`aos-meta`): the `redb` single-writer **unique commit point** and
+//! Forkloom metadata engine (`aos-meta`): the `redb` single-writer **unique commit point** and
 //! **rollback-only** crash recovery (ARCHITECTURE_V2 §4, §7.2, §7.3).
 //!
 //! | module | purpose |

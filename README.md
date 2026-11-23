@@ -1,4 +1,4 @@
-# Aether (`agentd`)
+# Forkloom (`agentd`)
 
 > **Stateful Sandbox & VM Forking Runtime on Linux + KVM**  
 > Bring `checkpoint()`, `restore()`, and live memory+disk `fork(N)` to AI RL/eval environments, isolated full-stack CI testing, and autonomous agents—with host-side zero-trust credential mediation.
@@ -10,10 +10,10 @@
 To eliminate cross-repository contract drift prior to `v1.0`, the Rust runtime crates, guest init agent, guest kernel build configs, gRPC contracts, and thin Python/TypeScript SDKs evolve atomically in this repository:
 
 ```text
-aether/
+forkloom/
 ├── AGENTS.md                  # Engineering guardrails & 5-agent team charter
 ├── Cargo.toml                 # Rust workspace manifest (Linux kernel/runtime crates)
-├── proto/aether/v1/           # Single source of truth for gRPC service contracts
+├── proto/forkloom/v1/         # Single source of truth for gRPC service contracts
 ├── crates/
 │   ├── aos-types/             # Core primitives (WorldId, FrameId, Persisted/Ephemeral, Untrusted)
 │   ├── aos-store/             # TreeStore (Btrfs subvols) & BlockStore (CoW disk images)
@@ -37,7 +37,7 @@ aether/
 
 ## Documentation Quick Links
 
-1. **[Product Positioning & Use Cases](./docs/PRODUCT_POSITIONING.md)** — What `Aether` is, how it differs from plain containers/sandboxes, and where it creates commercial value.
+1. **[Product Positioning & Use Cases](./docs/PRODUCT_POSITIONING.md)** — What `Forkloom` is, how it differs from plain containers/sandboxes, and where it creates commercial value.
 2. **[Architecture Specification v2.1](./docs/ARCHITECTURE_V2.md)** — Dual storage model, atomic `redb` commit invariants, Firecracker hot-fork reseed protocol, and `aos-gw` security design.
 3. **[Phase 0 Falsification Suite](./docs/PHASE0_FALSIFICATION.md)** — Hardware/WSL2 constraints and the 8 mandatory kernel experiments before Phase 1 coding.
 4. **[Infrastructure & Testbed Requirements](./docs/INFRA_REQUIREMENTS.md)** — Which machines to use and when to rent servers, storage-pool/`redb` filesystem layout, 30-second host acceptance checks, and the mandatory environment fingerprint for every benchmark report (it defines no metrics or gates; those stay in `PHASE0_FALSIFICATION.md`).

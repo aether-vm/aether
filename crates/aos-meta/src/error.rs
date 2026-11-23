@@ -18,7 +18,7 @@ pub enum MetaError {
     /// `meta_dir` and `pool_root` live on the same filesystem (Linux `st_dev` equal).
     #[error(
         "meta_dir {meta_dir} and pool_root {pool_root} are on the same filesystem; \
-         aether.redb must live outside the pool (set allow_same_fs_for_testing only in tests)"
+         forkloom.redb must live outside the pool (set allow_same_fs_for_testing only in tests)"
     )]
     SameFilesystemForbidden {
         /// Configured metadata directory.
@@ -87,7 +87,7 @@ pub enum MetaError {
     /// R6 found too many orphans; nothing was moved or deleted.
     #[error(
         "orphan circuit breaker: {orphan_count} orphan(s) out of {total_objects} object(s); \
-         refusing to start (was an old aether.redb backup restored?)"
+         refusing to start (was an old forkloom.redb backup restored?)"
     )]
     OrphanCircuitBreakerTriggered {
         /// Objects not referenced by any frame.

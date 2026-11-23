@@ -1,9 +1,9 @@
 syntax = "proto3";
 
-package aether.v1;
+package forkloom.v1;
 
 // Protocol negotiation & health service (mandatory before issuing stateful RPCs
-// so satellite tools like aether-mcp can detect version skew cleanly).
+// so satellite tools like forkloom-mcp can detect version skew cleanly).
 service SystemService {
   rpc NegotiateVersion(NegotiateVersionRequest) returns (NegotiateVersionResponse);
 }

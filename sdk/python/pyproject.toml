@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "aether-vm"
+name = "forkloom-vm"
 version = "0.1.0a0"
-description = "Thin Python gRPC client for Aether stateful sandbox & VM forking runtime"
+description = "Thin Python gRPC client for Forkloom stateful sandbox & VM forking runtime"
 readme = "../README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
@@ -15,5 +15,5 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/aether-vm"
-Repository = "https://github.com/aether-vm/aether"
+Homepage = "https://github.com/forkloom-vm"
+Repository = "https://github.com/forkloom-vm/forkloom"

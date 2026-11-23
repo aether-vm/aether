@@ -1,11 +1,11 @@
 {
-  "name": "@aether-vm/sdk",
+  "name": "@forkloom-vm/sdk",
   "version": "0.1.0-alpha.0",
-  "description": "Thin TypeScript/Node.js gRPC client for Aether stateful sandbox & VM forking runtime",
+  "description": "Thin TypeScript/Node.js gRPC client for Forkloom stateful sandbox & VM forking runtime",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aether-vm/aether.git",
+    "url": "git+https://github.com/forkloom-vm/forkloom.git",
     "directory": "sdk/typescript"
   },
   "type": "module",

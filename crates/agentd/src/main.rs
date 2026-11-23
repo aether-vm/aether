@@ -1,4 +1,4 @@
-//! agentd: Aether runtime daemon. Placeholder.
+//! agentd: Forkloom runtime daemon. Placeholder.
 
 #![forbid(unsafe_code)]
 

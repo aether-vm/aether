@@ -3,7 +3,7 @@
 //! Run as root (`sudo -E`) from the repository root, e.g.
 //!
 //! ```text
-//! sudo -E ./target/release/phase0-harness --root /var/lib/aether/phase0 f0-1-btrfs-snap --pool-mib 3072
+//! sudo -E ./target/release/phase0-harness --root /var/lib/forkloom/phase0 f0-1-btrfs-snap --pool-mib 3072
 //! ```
 
 #[cfg(not(target_os = "linux"))]
@@ -25,10 +25,10 @@ mod cli {
     use phase0_harness::{exp_f0_1, exp_f0_2, exp_f0_3, exp_f0_4, Ctx};
 
     #[derive(Parser, Debug)]
-    #[command(name = "phase0-harness", version, about = "Aether Phase 0 falsification suite (WSL2 numbers are ADVISORY only)")]
+    #[command(name = "phase0-harness", version, about = "Forkloom Phase 0 falsification suite (WSL2 numbers are ADVISORY only)")]
     struct Cli {
         /// Pool root (must be native Linux storage; /mnt/* and 9p are refused).
-        #[arg(long, global = true, default_value = "/var/lib/aether/phase0")]
+        #[arg(long, global = true, default_value = "/var/lib/forkloom/phase0")]
         root: PathBuf,
         /// Report output directory.
         #[arg(long, global = true, default_value = "benchmarks/reports/wsl2-baseline")]
