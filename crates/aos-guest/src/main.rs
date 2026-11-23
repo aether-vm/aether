@@ -60,6 +60,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if pid1_mode {
         linux_sys::mount_pid1_filesystems();
+        if let Err(err) = linux_sys::bring_up_loopback() {
+            eprintln!("aos-guest: warning: failed to bring up loopback interface lo: {err}");
+        }
         // Background orphan reaper for orphaned grandchildren when running as PID 1.
         // Coordinates with `ActiveChildren` so direct Exec/hook children are never stolen.
         thread::Builder::new()

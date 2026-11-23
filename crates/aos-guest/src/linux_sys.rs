@@ -32,6 +32,10 @@ const RNDRESEEDCRNG: libc::c_ulong = 0x0000_5207;
 const AF_VSOCK: libc::c_int = 40;
 const VMADDR_CID_ANY: u32 = u32::MAX;
 
+/// Linux `SIOCGIFFLAGS` / `SIOCSIFFLAGS` ioctls (`include/uapi/linux/sockios.h`).
+const SIOCGIFFLAGS: libc::c_ulong = 0x8913;
+const SIOCSIFFLAGS: libc::c_ulong = 0x8914;
+
 #[repr(C)]
 struct RandPoolInfo64 {
     entropy_count: libc::c_int,
@@ -456,6 +460,47 @@ pub fn stream_from_inherited_fd(fd: RawFd) -> io::Result<(File, File)> {
     // `File::try_clone()` uses `F_DUPFD_CLOEXEC` on Unix so `writer` is also `FD_CLOEXEC`.
     let writer = reader.try_clone()?;
     Ok((reader, writer))
+}
+
+/// Bring up the loopback interface (`lo`) with `IFF_UP | IFF_RUNNING` during PID-1 init.
+///
+/// The Linux kernel leaves `lo` in `DOWN` state until userspace raises `IFF_UP`;
+/// raising it causes `devinet`/`addrconf` to automatically attach `127.0.0.1/8` and `::1/128`.
+pub fn bring_up_loopback() -> io::Result<()> {
+    // SAFETY: `socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0)` returns a fresh fd or -1.
+    let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a newly created owned fd.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+
+    // SAFETY: `libc::ifreq` is a POD C struct zero-initialized before setting `ifr_name`.
+    let mut ifr: libc::ifreq = unsafe { mem::zeroed() };
+    ifr.ifr_name[0] = b'l' as libc::c_char;
+    ifr.ifr_name[1] = b'o' as libc::c_char;
+
+    // SAFETY: `fd` is a valid AF_INET socket and `&mut ifr` is a properly aligned `ifreq`.
+    if unsafe { libc::ioctl(fd.as_raw_fd(), SIOCGIFFLAGS as _, &mut ifr as *mut libc::ifreq) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: `SIOCGIFFLAGS` populated `ifr.ifr_ifru.ifru_flags` in the union.
+    let already_up = unsafe { (ifr.ifr_ifru.ifru_flags & libc::IFF_UP as libc::c_short) != 0 };
+    if already_up {
+        return Ok(());
+    }
+
+    // SAFETY: `SIOCGIFFLAGS` populated `ifr.ifr_ifru.ifru_flags` in the union.
+    unsafe {
+        ifr.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
+    }
+
+    // SAFETY: `fd` is valid and `ifr` holds the updated `ifru_flags` for `"lo"`.
+    if unsafe { libc::ioctl(fd.as_raw_fd(), SIOCSIFFLAGS as _, &ifr as *const libc::ifreq) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Best-effort PID-1 virtual filesystem mounts (`/proc`, `/sys`, `/dev`, `/sys/fs/cgroup`).

@@ -704,7 +704,7 @@ impl GuestBackend for MockBackend {
             exit_code: Some(0),
             signal: None,
             timed_out: false,
-            cgroup_killed: true,
+            cgroup_killed: false,
             duration: Duration::from_millis(5),
             stdout,
             stderr,
@@ -1360,10 +1360,28 @@ fn exec_enforces_frame_safe_output_and_chunk_bounds() {
         .iter()
         .find(|e| e.req_id == 4 && matches!(e.payload, GuestResponse::ExecResult { .. }))
         .expect("boundary ExecResult should fit inside max_frame");
-    if let GuestResponse::ExecResult { stdout, stderr, .. } = &exec4.payload {
+    if let GuestResponse::ExecResult {
+        stdout,
+        stderr,
+        cgroup_killed,
+        ..
+    } = &exec4.payload
+    {
+        assert!(!cgroup_killed, "clean exit must report cgroup_killed=false");
         assert!(stdout.truncated);
         assert!(stderr.truncated);
         assert_eq!(stdout.head.len() + stdout.tail.len(), out_cap);
         assert_eq!(stderr.head.len() + stderr.tail.len(), out_cap);
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_bring_up_loopback_ensures_lo_is_up() {
+    aos_guest::linux_sys::bring_up_loopback().expect("bring_up_loopback should succeed");
+    let flags_hex = fs::read_to_string("/sys/class/net/lo/flags")
+        .expect("read /sys/class/net/lo/flags");
+    let flags = u32::from_str_radix(flags_hex.trim().trim_start_matches("0x"), 16)
+        .expect("parse lo flags hex");
+    assert_ne!(flags & 0x1, 0, "lo IFF_UP bit must be set (flags=0x{flags:x})");
 }

@@ -52,12 +52,28 @@ impl LinuxGuestBackend {
         &self.cgroup
     }
 
-    /// Terminate every process inside `dir` (using `cgroup.kill`, or a fork-bomb-safe
-    /// freeze + repeated SIGKILL loop when `cgroup.kill` is absent) and remove `dir`.
-    fn kill_and_cleanup_subcgroup(&self, dir: &Path) -> bool {
+    /// Terminate every remaining process inside `dir` (using `cgroup.kill`, or a
+    /// fork-bomb-safe freeze + repeated SIGKILL loop when `cgroup.kill` is absent)
+    /// and remove `dir`.
+    ///
+    /// Returns `true` ONLY if live processes were actually present before teardown
+    /// (or `forced_kill` is true, e.g. timeout) and were terminated — never `true`
+    /// for a clean exit with zero surviving descendants.
+    fn kill_and_cleanup_subcgroup(&self, dir: &Path, forced_kill: bool) -> bool {
+        let had_live_procs = forced_kill
+            || self
+                .cgroup
+                .read_pids(dir)
+                .map(|pids| !pids.is_empty())
+                .unwrap_or(false);
+
         let mut killed = false;
         match self.cgroup.trigger_cgroup_kill(dir) {
-            Ok(true) => killed = true,
+            Ok(true) => {
+                if had_live_procs {
+                    killed = true;
+                }
+            }
             Ok(false) | Err(_) => {
                 // Fork-bomb-safe fallback: freeze sub-cgroup first so no new tasks can
                 // spawn while we drain `cgroup.procs`, then repeatedly SIGKILL until empty.
@@ -364,7 +380,7 @@ impl GuestBackend for LinuxGuestBackend {
                     match child.try_wait() {
                         Ok(Some(st)) => {
                             if let Some(dir) = &sub_cgroup {
-                                cgroup_killed = self.kill_and_cleanup_subcgroup(dir);
+                                cgroup_killed = self.kill_and_cleanup_subcgroup(dir, false);
                             }
                             exited_status = Some(Ok(st));
                         }
@@ -374,7 +390,7 @@ impl GuestBackend for LinuxGuestBackend {
                             {
                                 timed_out = true;
                                 if let Some(dir) = &sub_cgroup {
-                                    cgroup_killed = self.kill_and_cleanup_subcgroup(dir);
+                                    cgroup_killed = self.kill_and_cleanup_subcgroup(dir, true);
                                 }
                                 let _ = child.kill();
                                 exited_status = Some(child.wait());
@@ -382,7 +398,7 @@ impl GuestBackend for LinuxGuestBackend {
                         }
                         Err(e) => {
                             if let Some(dir) = &sub_cgroup {
-                                cgroup_killed = self.kill_and_cleanup_subcgroup(dir);
+                                cgroup_killed = self.kill_and_cleanup_subcgroup(dir, true);
                             }
                             exited_status = Some(Err(e));
                         }
@@ -488,7 +504,7 @@ impl GuestBackend for LinuxGuestBackend {
                     if Instant::now() >= deadline {
                         timed_out = true;
                         if let Some(dir) = &sub_cgroup {
-                            self.kill_and_cleanup_subcgroup(dir);
+                            self.kill_and_cleanup_subcgroup(dir, true);
                         }
                         let _ = child.kill();
                         break child.wait();
@@ -502,7 +518,7 @@ impl GuestBackend for LinuxGuestBackend {
         if let Some(dir) = &sub_cgroup
             && !timed_out
         {
-            self.kill_and_cleanup_subcgroup(dir);
+            self.kill_and_cleanup_subcgroup(dir, false);
         }
 
         if timed_out {
