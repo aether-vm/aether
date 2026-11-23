@@ -107,7 +107,12 @@ fn fifty_rounds_of_random_crashes_keep_metadata_and_pool_in_lockstep() {
                     if kinds.is_empty() {
                         kinds.push(ObjectKind::DiskImage);
                     }
-                    let parent = rng.pick(&m.ids(Some(FrameDurability::Durable)));
+                    let cands: Vec<FrameId> = m
+                        .ids(Some(FrameDurability::Durable))
+                        .into_iter()
+                        .filter(|f| !m.marked.contains(f))
+                        .collect();
+                    let parent = rng.pick(&cands);
                     let f = h.commit_frame(&mut e, FrameDurability::Durable, parent, &kinds);
                     m.frames
                         .insert(f, (FrameDurability::Durable, e.frame(f).unwrap().unwrap().state.objects().to_vec()));
@@ -170,13 +175,14 @@ fn fifty_rounds_of_random_crashes_keep_metadata_and_pool_in_lockstep() {
                             &PinSpec {
                                 pin_id: "keep".into(),
                                 owner: "alice".into(),
-                                lease_ttl_ms: 1_000 * 3600 * 1000,
+                                lease_ttl_ms: 7 * 24 * 3600 * 1000,
                             },
                         )
                         .unwrap();
                         m.pinned.insert(f);
                     } else {
-                        e.advance_timeline_cas("main", m.head, f, None).unwrap();
+                        e.advance_timeline_cas("main", "alice", m.head, f, None)
+                            .unwrap();
                         m.head = Some(f);
                     }
                 }
@@ -227,6 +233,10 @@ fn fifty_rounds_of_random_crashes_keep_metadata_and_pool_in_lockstep() {
         let mut expected_deleting = failed_deletes;
         if rebooted {
             boot = if boot == boot_a() { boot_b() } else { boot_a() };
+            // Real host reboot wipes volatile tmpfs.
+            for entry in std::fs::read_dir(&h.vol).unwrap() {
+                let _ = aos_meta::hooks::remove_path(&entry.unwrap().path());
+            }
             for f in m.ids(Some(FrameDurability::Volatile)) {
                 m.remove(&f);
                 expected_deleting += 1;

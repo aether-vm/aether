@@ -18,6 +18,7 @@ pub(crate) enum IdemResponse {
     Committed(CommittedFrame),
     Deleted(DeleteOutcome),
     TimelineAdvanced(TimelineAdvance),
+    TimelineDeleted(FrameId),
     /// `create_world` / `destroy_world`: replays return the world's *current* record.
     World(WorldId),
 }

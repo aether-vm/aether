@@ -61,6 +61,7 @@ fn create_world_replay_after_crash_returns_the_lost_original() {
     ));
     // Records expire with their TTL.
     let ttl = e.config().idempotency_ttl_ms;
+    h.clock.advance(ttl);
     assert!(e.collect_garbage(T0 + ttl).unwrap().idempotency_purged >= 1);
 }
 
@@ -135,11 +136,26 @@ fn fencing_token_fences_out_the_previous_executor() {
 
 #[test]
 fn selectors_must_be_non_empty_and_never_cross_owners() {
-    let (_h, mut e, f) = setup("selector");
+    let (h, mut e, f) = setup("selector");
     let a1 = e.create_world(&world_req(f, &[("team", "rl"), ("run", "1")]), None).unwrap();
     let a2 = e.create_world(&world_req(f, &[("team", "rl"), ("run", "2")]), None).unwrap();
     let a3 = e.create_world(&world_req(f, &[("team", "web")]), None).unwrap();
-    let mut bob_req = world_req(f, &[("team", "rl")]);
+    let mut bob_on_alice = world_req(f, &[("team", "rl")]);
+    bob_on_alice.owner = "bob".into();
+    assert!(matches!(
+        e.create_world(&bob_on_alice, None),
+        Err(MetaError::OwnerMismatch { .. })
+    ));
+    let p_bob = e
+        .prepare_frame(
+            &Harness::prepare_req("bob", FrameDurability::Durable, None, &[ObjectKind::DiskImage]),
+            None,
+        )
+        .unwrap();
+    let bundle_bob = h.produce(&p_bob, boot_a());
+    e.commit_frame(&Harness::commit_req(p_bob.frame_id, "bob"), bundle_bob, None)
+        .unwrap();
+    let mut bob_req = world_req(p_bob.frame_id, &[("team", "rl")]);
     bob_req.owner = "bob".into();
     let b1 = e.create_world(&bob_req, None).unwrap();
 
@@ -285,7 +301,7 @@ fn pin_renewals_flush_to_redb_at_low_frequency() {
 
 #[test]
 fn pins_are_owned_and_unknown_pins_are_reported() {
-    let (_h, mut e, f) = setup("pin-owner");
+    let (h, mut e, f) = setup("pin-owner");
     let spec = PinSpec {
         pin_id: "p".into(),
         owner: "alice".into(),
@@ -312,6 +328,7 @@ fn pins_are_owned_and_unknown_pins_are_reported() {
         e.renew_pin_lease(f, "nope", "alice"),
         Err(MetaError::PinNotFound { .. })
     ));
+    h.clock.advance(10);
     assert_eq!(e.collect_garbage(T0 + 10).unwrap().pins_expired, 1);
     assert!(matches!(
         e.renew_pin_lease(f, "p", "alice"),

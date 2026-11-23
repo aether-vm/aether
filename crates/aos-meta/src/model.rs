@@ -391,6 +391,9 @@ pub enum FrameState {
         reason: DeleteReason,
         /// Wall-clock time the delete was decided.
         marked_at_ms: u64,
+        /// Owner of the frame (checked on retry of `delete_frame`).
+        #[serde(default)]
+        owner: Option<String>,
     },
 }
 
@@ -428,14 +431,14 @@ impl FrameState {
         }
     }
 
-    /// Owner (not tracked once deleting).
+    /// Owner.
     #[must_use]
     pub fn owner(&self) -> Option<&str> {
         match self {
             FrameState::Preparing { owner, .. } | FrameState::Committed { owner, .. } => {
                 Some(owner)
             }
-            FrameState::Deleting { .. } => None,
+            FrameState::Deleting { owner, .. } => owner.as_deref(),
         }
     }
 }
@@ -477,6 +480,12 @@ pub enum Hold {
         /// Persisted (low-water) expiry.
         expires_at_ms: u64,
     },
+    /// Lineage parent of an in-flight `Preparing` child frame; released when the child commits,
+    /// aborts, or is rolled back by R3.
+    PreparingParent {
+        /// Child frame currently in `Preparing`.
+        child_frame: FrameId,
+    },
 }
 
 impl Hold {
@@ -487,6 +496,7 @@ impl Hold {
             Hold::TimelineHead { timeline_name } => format!("timeline:{timeline_name}"),
             Hold::WorldBase { world_id, .. } => format!("world:{world_id}"),
             Hold::Pin { pin_id, .. } => format!("pin:{pin_id}"),
+            Hold::PreparingParent { child_frame } => format!("preparing:{child_frame}"),
         }
     }
 }
@@ -623,14 +633,27 @@ impl IdempotencyKey {
 /// A row of the `QUARANTINE` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuarantineRecord {
-    /// Original entry name in `objects/`.
+    /// Original entry name in `objects/` (lossy UTF-8 for display; exact when valid UTF-8).
     pub name: String,
+    /// Exact original filename when `name` is not valid UTF-8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_name: Option<std::ffi::OsString>,
     /// Epoch whose recovery quarantined it (`quarantine/epoch-<n>/`).
     pub quarantined_epoch: EpochId,
     /// When.
     pub quarantined_at_ms: u64,
     /// Earliest physical purge time.
     pub purge_after_ms: u64,
+}
+
+impl QuarantineRecord {
+    /// Exact OS filename inside `quarantine/epoch-<n>/`.
+    #[must_use]
+    pub fn file_name(&self) -> std::ffi::OsString {
+        self.raw_name
+            .clone()
+            .unwrap_or_else(|| std::ffi::OsString::from(&self.name))
+    }
 }
 
 #[cfg(test)]

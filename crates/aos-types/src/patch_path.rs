@@ -357,7 +357,11 @@ fn is_windows_reserved_name(component: &str) -> bool {
 }
 
 fn fold_component(component: &str) -> String {
-    let no_ignorable: String = component.chars().filter(|c| !is_hfs_ignorable(*c)).collect();
+    let no_ignorable: String = component
+        .chars()
+        .filter(|c| !is_hfs_ignorable(*c))
+        .map(|c| if c == '\u{017f}' { 's' } else { c })
+        .collect();
     let decomposed: String = no_ignorable.nfd().collect();
     let lowered = decomposed.to_lowercase();
     lowered.nfd().collect()
@@ -442,7 +446,9 @@ impl PatchPathValidator {
     fn is_gitmodules(&self, component: &str) -> bool {
         if self.cross() {
             let n = alias_normalize(component);
-            n == ".gitmodules" || is_short_name(&n, "gitmod~")
+            n == ".gitmodules"
+                || is_short_name(&n, "gitmod~")
+                || is_short_name(&n, "gi7eba~")
         } else {
             component == ".gitmodules"
         }
@@ -587,6 +593,141 @@ impl PatchPathValidator {
         Ok(())
     }
 
+    fn active_base_symlink(
+        &self,
+        folded_key: &str,
+        ops: &HashMap<&str, &PatchOp>,
+    ) -> Option<String> {
+        let base = self.base.as_ref()?;
+        for (q, is_dir) in base.fold.get(folded_key).into_iter().flatten() {
+            if !is_dir
+                && base.tree.leaf(q) == Some(BaseKind::Symlink)
+                && !ops.contains_key(q.as_str())
+            {
+                return Some(q.clone());
+            }
+        }
+        None
+    }
+
+    fn check_symlink_chain(
+        &self,
+        origin_path: &str,
+        start_dir: &[&str],
+        origin_target: &str,
+        patch_symlinks: &HashMap<String, (&str, &str)>,
+        ops: &HashMap<&str, &PatchOp>,
+    ) -> Result<(), PatchPathError> {
+        let mut stack: Vec<String> = start_dir.iter().map(|s| (*s).to_owned()).collect();
+        let mut active: HashSet<String> = HashSet::new();
+        active.insert(self.fold_path(origin_path));
+        let mut first_traversed: Option<String> = None;
+        let mut hops = 0usize;
+        self.expand_symlink_target(
+            origin_path,
+            origin_target,
+            origin_target,
+            &mut stack,
+            patch_symlinks,
+            ops,
+            &mut active,
+            &mut first_traversed,
+            &mut hops,
+        )?;
+        if let Some(symlink) = first_traversed {
+            return Err(err(
+                origin_path,
+                PatchPathViolation::PathThroughSymlink { symlink },
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn expand_symlink_target(
+        &self,
+        origin_path: &str,
+        origin_target: &str,
+        current_target: &str,
+        stack: &mut Vec<String>,
+        patch_symlinks: &HashMap<String, (&str, &str)>,
+        ops: &HashMap<&str, &PatchOp>,
+        active: &mut HashSet<String>,
+        first_traversed: &mut Option<String>,
+        hops: &mut usize,
+    ) -> Result<(), PatchPathError> {
+        const MAX_SYMLINK_HOPS: usize = 64;
+        let escape = || {
+            err(
+                origin_path,
+                PatchPathViolation::SymlinkEscape {
+                    target: origin_target.to_owned(),
+                },
+            )
+        };
+        if current_target.starts_with('/') {
+            return Err(escape());
+        }
+        for t in current_target.split('/') {
+            if self.is_dotgit(t) {
+                return Err(err(
+                    origin_path,
+                    PatchPathViolation::SymlinkToDotGit {
+                        target: origin_target.to_owned(),
+                    },
+                ));
+            }
+            match t {
+                "" | "." => {}
+                ".." => {
+                    if stack.pop().is_none() {
+                        return Err(escape());
+                    }
+                }
+                other => {
+                    stack.push(other.to_owned());
+                    let resolved = stack.join("/");
+                    let key = self.fold_path(&resolved);
+                    if let Some((link_path, link_target)) = patch_symlinks.get(&key) {
+                        if first_traversed.is_none() {
+                            *first_traversed = Some((*link_path).to_owned());
+                        }
+                        *hops += 1;
+                        if *hops > MAX_SYMLINK_HOPS || !active.insert(key.clone()) {
+                            return Err(err(
+                                origin_path,
+                                PatchPathViolation::PathThroughSymlink {
+                                    symlink: first_traversed
+                                        .clone()
+                                        .unwrap_or_else(|| (*link_path).to_owned()),
+                                },
+                            ));
+                        }
+                        stack.pop();
+                        self.expand_symlink_target(
+                            origin_path,
+                            origin_target,
+                            link_target,
+                            stack,
+                            patch_symlinks,
+                            ops,
+                            active,
+                            first_traversed,
+                            hops,
+                        )?;
+                        active.remove(&key);
+                    } else if let Some(base_link) = self.active_base_symlink(&key, ops) {
+                        return Err(err(
+                            origin_path,
+                            PatchPathViolation::PathThroughSymlink { symlink: base_link },
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Validate every entry and the relations between them (and the base tree, if configured).
     pub fn validate_entries(&self, entries: &[PatchEntry]) -> Result<(), PatchPathError> {
         // 1. per-entry syntax, duplicates, entry-kind rules
@@ -609,11 +750,15 @@ impl PatchPathValidator {
             .map(|(e, _)| e.path.as_str())
             .collect();
 
-        // 2. no path may traverse a symlink (created by this patch, or existing in the base)
-        let mut patch_symlinks: HashMap<String, &str> = HashMap::new();
+        // 2. no path (or symlink target) may traverse a symlink (created by this patch, or
+        //    existing in the base)
+        let mut patch_symlinks: HashMap<String, (&str, &str)> = HashMap::new();
         for (e, _) in &parsed {
-            if matches!(e.op, PatchOp::Put(EntryKind::Symlink { .. })) {
-                patch_symlinks.insert(self.fold_path(&e.path), e.path.as_str());
+            if let PatchOp::Put(EntryKind::Symlink { target }) = &e.op {
+                patch_symlinks.insert(
+                    self.fold_path(&e.path),
+                    (e.path.as_str(), target.as_str()),
+                );
             }
         }
         for (e, comps) in &parsed {
@@ -624,25 +769,29 @@ impl PatchPathValidator {
                 }
                 prefix.push_str(c);
                 let key = self.fold_path(&prefix);
-                if let Some(link) = patch_symlinks.get(&key) {
+                if let Some((link, _)) = patch_symlinks.get(&key) {
                     return Err(err(
                         &e.path,
                         PatchPathViolation::PathThroughSymlink { symlink: (*link).to_owned() },
                     ));
                 }
-                if let Some(base) = &self.base {
-                    for (q, is_dir) in base.fold.get(&key).into_iter().flatten() {
-                        if !is_dir
-                            && base.tree.leaf(q) == Some(BaseKind::Symlink)
-                            && !ops.contains_key(q.as_str())
-                        {
-                            return Err(err(
-                                &e.path,
-                                PatchPathViolation::PathThroughSymlink { symlink: q.clone() },
-                            ));
-                        }
-                    }
+                if let Some(link) = self.active_base_symlink(&key, &ops) {
+                    return Err(err(
+                        &e.path,
+                        PatchPathViolation::PathThroughSymlink { symlink: link },
+                    ));
                 }
+            }
+        }
+        for (e, comps) in &parsed {
+            if let PatchOp::Put(EntryKind::Symlink { target }) = &e.op {
+                self.check_symlink_chain(
+                    &e.path,
+                    &comps[..comps.len() - 1],
+                    target,
+                    &patch_symlinks,
+                    &ops,
+                )?;
             }
         }
 
@@ -1222,5 +1371,115 @@ mod tests {
         assert!(cross().validate_entries(&[]).is_ok());
         let many: Vec<PatchEntry> = (0..5000).map(|i| PatchEntry::file(format!("d{}/f{i}.txt", i % 50))).collect();
         assert!(cross().validate_entries(&many).is_ok());
+    }
+
+    #[test]
+    fn t20_multihop_symlink_chain_escape_and_cycles_are_rejected() {
+        let v = cross();
+        // Two-hop escape out of repo root: `a/up -> ..` (resolves to root), `esc -> a/up/../etc/passwd`.
+        let escape_chain = vec![
+            PatchEntry::symlink("a/up", ".."),
+            PatchEntry::symlink("esc", "a/up/../etc/passwd"),
+        ];
+        assert!(matches!(
+            kind_of(&v, &escape_chain),
+            Some(V::SymlinkEscape { .. })
+        ));
+        // Order-independent: `esc` listed before `a/up`.
+        let escape_chain_rev = vec![
+            PatchEntry::symlink("esc", "a/up/../etc/passwd"),
+            PatchEntry::symlink("a/up", ".."),
+        ];
+        assert!(matches!(
+            kind_of(&v, &escape_chain_rev),
+            Some(V::SymlinkEscape { .. })
+        ));
+        // Case-folded multi-hop escape (`A/UP` vs `a/up`).
+        let escape_folded = vec![
+            PatchEntry::symlink("a/up", ".."),
+            PatchEntry::symlink("esc", "A/UP/../etc/passwd"),
+        ];
+        assert!(matches!(
+            kind_of(&v, &escape_folded),
+            Some(V::SymlinkEscape { .. })
+        ));
+        // Three-hop escape through nested symlinks (`s3` listed first -> SymlinkEscape; `s2` first -> PathThroughSymlink).
+        let three_hop = vec![
+            PatchEntry::symlink("a/b/s3", "s2/../outside"),
+            PatchEntry::symlink("a/b/s2", "s1/.."),
+            PatchEntry::symlink("a/b/s1", ".."),
+        ];
+        assert!(matches!(
+            kind_of(&v, &three_hop),
+            Some(V::SymlinkEscape { .. })
+        ));
+        // Multi-hop symlink into `.git`.
+        let dotgit_chain = vec![
+            PatchEntry::symlink("a/up", ".."),
+            PatchEntry::symlink("esc", "a/up/.git/hooks/pre-commit"),
+        ];
+        assert!(matches!(
+            kind_of(&v, &dotgit_chain),
+            Some(V::SymlinkToDotGit { .. })
+        ));
+        // Symlink target traversing a patch symlink without escaping is still rejected as PathThroughSymlink.
+        let in_tree_chain = vec![
+            PatchEntry::symlink("a/up", ".."),
+            PatchEntry::symlink("esc", "a/up/src/lib.rs"),
+        ];
+        assert!(matches!(
+            kind_of(&v, &in_tree_chain),
+            Some(V::PathThroughSymlink { symlink }) if symlink == "a/up"
+        ));
+        // Symlink cycle (`a -> b`, `b -> a` and self-loop `s -> s`).
+        let cycle = vec![
+            PatchEntry::symlink("a", "b"),
+            PatchEntry::symlink("b", "a"),
+        ];
+        assert!(matches!(
+            kind_of(&v, &cycle),
+            Some(V::PathThroughSymlink { .. })
+        ));
+        let self_cycle = vec![PatchEntry::symlink("s", "s")];
+        assert!(matches!(
+            kind_of(&v, &self_cycle),
+            Some(V::PathThroughSymlink { .. })
+        ));
+
+        // BaseTree symlink traversed by a patch symlink target.
+        let base = BaseTree::from_entries([
+            ("a/up", BaseKind::Symlink),
+            ("dir/sub", BaseKind::File),
+        ]);
+        let vb = cross().with_base_tree(base);
+        assert!(matches!(
+            kind_of(&vb, &[PatchEntry::symlink("esc", "a/up/../etc/passwd")]),
+            Some(V::PathThroughSymlink { symlink }) if symlink == "a/up"
+        ));
+        assert!(matches!(
+            kind_of(&vb, &[PatchEntry::symlink("esc", "A/UP/foo")]),
+            Some(V::PathThroughSymlink { symlink }) if symlink == "a/up"
+        ));
+        assert!(matches!(
+            kind_of(&vb, &[PatchEntry::symlink("esc", "a/up/../.git/hooks/pre-commit")]),
+            Some(V::SymlinkToDotGit { .. } | V::PathThroughSymlink { .. })
+        ));
+        // Removing the base symlink first allows targeting under that path.
+        let replaced = vec![
+            PatchEntry::remove("a/up"),
+            PatchEntry::file("a/up/real.txt"),
+            PatchEntry::symlink("ok", "a/up/real.txt"),
+        ];
+        assert!(vb.validate_entries(&replaced).is_ok());
+
+        // Long-S (`\u{017f}`) case-folding collision and NTFS `.gitmodules` short-name alias.
+        assert!(matches!(
+            kind_of(&v, &files(&["ma\u{017f}s", "mass"])),
+            Some(V::FoldCollision { .. })
+        ));
+        assert_eq!(
+            kind_of(&v, &[PatchEntry::symlink("GI7EBA~1", "target")]),
+            Some(V::SymlinkedGitmodules)
+        );
     }
 }

@@ -91,7 +91,28 @@ pub(crate) fn idem_key(k: &IdempotencyKey) -> String {
 }
 
 pub(crate) fn quarantine_key(r: &QuarantineRecord) -> String {
-    format!("{}/{}", r.quarantined_epoch.cgroup_dir_name(), r.name)
+    match &r.raw_name {
+        None => format!("{}/{}", r.quarantined_epoch.cgroup_dir_name(), r.name),
+        Some(raw) => {
+            let encoded = serde_json::to_vec(raw).unwrap_or_default();
+            let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+            format!(
+                "{}/{}\0{}",
+                r.quarantined_epoch.cgroup_dir_name(),
+                r.name,
+                hex
+            )
+        }
+    }
+}
+
+pub(crate) fn parse_hold_key_frame(key: &str) -> Result<FrameId> {
+    let prefix = key
+        .get(..aos_types::id::BASE32_LEN)
+        .filter(|_| key.as_bytes().get(aos_types::id::BASE32_LEN) == Some(&b'/'))
+        .ok_or_else(|| crate::error::MetaError::Codec(format!("malformed hold key {key:?}")))?;
+    FrameId::from_base32(prefix)
+        .map_err(|e| crate::error::MetaError::Codec(format!("hold key {key:?}: {e}")))
 }
 
 pub(crate) fn get_json<T, Tbl>(t: &Tbl, key: &str) -> Result<Option<T>>

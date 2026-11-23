@@ -108,6 +108,7 @@ fn pins_survive_ten_hours_of_downtime_and_restart_from_recovery_time() {
     assert_eq!(e.collect_garbage(now).unwrap().pins_expired, 0);
     assert!(e.frame(f).unwrap().is_some());
     // The lease still runs out normally afterwards.
+    h.clock.advance(HOUR);
     assert_eq!(e.collect_garbage(now + HOUR).unwrap().pins_expired, 1);
     assert!(e.holds(f).unwrap().is_empty());
 }
@@ -203,14 +204,17 @@ fn old_epoch_worlds_become_lost_release_holds_and_keep_a_tombstone() {
     ));
     // Tombstones expire.
     let ttl = e.config().world_tombstone_ttl_ms;
+    h.clock.advance(ttl - 1);
     assert_eq!(e.collect_garbage(T0 + ttl - 1).unwrap().tombstones_purged, 0);
+    h.clock.advance(1);
     assert_eq!(e.collect_garbage(T0 + ttl).unwrap().tombstones_purged, 1);
     assert!(e.world(w.world_id).unwrap().is_none());
 }
 
 #[test]
 fn few_orphans_are_quarantined_then_purged_after_the_grace_period() {
-    let h = Harness::new("r6-quarantine");
+    let mut h = Harness::new("r6-quarantine");
+    h.cfg.max_small_pool_orphans = 3;
     let (mut e, _) = h.open(boot_a());
     let f = h.durable(&mut e);
     let keep = names(&e, f);
@@ -236,8 +240,10 @@ fn few_orphans_are_quarantined_then_purged_after_the_grace_period() {
     let grace = e.config().quarantine_grace_ms;
     assert!(recs.iter().all(|r| r.purge_after_ms == T0 + grace));
 
+    h.clock.advance(grace - 1);
     assert_eq!(e.collect_garbage(T0 + grace - 1).unwrap().quarantine_purged, 0);
     assert_eq!(h.quarantine_entries().len(), 3);
+    h.clock.advance(1);
     assert_eq!(e.collect_garbage(T0 + grace).unwrap().quarantine_purged, 3);
     assert!(h.quarantine_entries().is_empty());
     assert!(e.quarantine_records().unwrap().is_empty());

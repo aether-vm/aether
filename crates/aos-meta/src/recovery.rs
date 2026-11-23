@@ -5,16 +5,19 @@
 //! recovery again. Nothing is ever rolled forward.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::sync::Arc;
+use std::time::Instant;
 
 use aos_types::{BootId, EpochId, FrameId, PersistProof};
-use redb::Database;
+use redb::{Database, TableError};
 
 use crate::config::{Clock, MetaConfig};
 use crate::error::{MetaError, Result};
 use crate::hooks::RecoveryHooks;
 use crate::idempotency::IdempotencyRecord;
+use crate::lease::PinLease;
 use crate::model::{
     DeleteReason, FrameDurability, FrameRecord, FrameState, Hold, ObjectLocation,
     QuarantineRecord, WorldRecord, WorldState,
@@ -54,6 +57,7 @@ struct R1Outcome {
     boot_changed: bool,
     volatile_expired: usize,
     pins_renewed: usize,
+    pin_leases: HashMap<(FrameId, String), PinLease>,
 }
 
 fn validate_config(cfg: &MetaConfig) -> Result<()> {
@@ -67,11 +71,117 @@ fn validate_config(cfg: &MetaConfig) -> Result<()> {
             "meta_dir and pool_root must be set".into(),
         ));
     }
+    if cfg.max_orphan_count == 0 {
+        return Err(MetaError::InvalidArgument(
+            "max_orphan_count must be > 0".into(),
+        ));
+    }
+    if cfg.min_orphan_ratio_sample == 0 {
+        return Err(MetaError::InvalidArgument(
+            "min_orphan_ratio_sample must be > 0".into(),
+        ));
+    }
+    if cfg.max_small_pool_orphans == 0
+        || cfg.max_small_pool_orphans > cfg.max_orphan_count
+        || cfg.max_small_pool_orphans >= cfg.min_orphan_ratio_sample
+    {
+        return Err(MetaError::InvalidArgument(
+            "max_small_pool_orphans must be within 1..min_orphan_ratio_sample and <= max_orphan_count"
+                .into(),
+        ));
+    }
+    if cfg.max_pin_ttl_ms == 0 {
+        return Err(MetaError::InvalidArgument(
+            "max_pin_ttl_ms must be > 0".into(),
+        ));
+    }
+    if cfg.max_world_lease_ttl_ms == 0 {
+        return Err(MetaError::InvalidArgument(
+            "max_world_lease_ttl_ms must be > 0".into(),
+        ));
+    }
+    if cfg.idempotency_ttl_ms == 0 || cfg.world_tombstone_ttl_ms < cfg.idempotency_ttl_ms {
+        return Err(MetaError::InvalidArgument(
+            "world_tombstone_ttl_ms must be >= idempotency_ttl_ms (> 0)".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn check_orphan_breaker(cfg: &MetaConfig, orphan_count: usize, total_objects: usize) -> Result<()> {
+    #[allow(clippy::cast_precision_loss)]
+    let ratio_or_small_tripped = if total_objects < cfg.min_orphan_ratio_sample {
+        orphan_count > cfg.max_small_pool_orphans
+    } else {
+        total_objects > 0 && (orphan_count as f64 / total_objects as f64) > cfg.max_orphan_ratio
+    };
+    if orphan_count > cfg.max_orphan_count || ratio_or_small_tripped {
+        return Err(MetaError::OrphanCircuitBreakerTriggered {
+            orphan_count,
+            total_objects,
+        });
+    }
+    Ok(())
+}
+
+/// Read-only R0/R6 pre-flight check before R1/R2/R3/R5 mutate `redb` or unlink any objects:
+/// verifies orphan circuit-breaker bounds (against all known `Committed | Preparing | Deleting`
+/// pool objects) and ensures every `Committed` frame's pool objects exist on disk.
+fn preflight_r6_check(cfg: &MetaConfig, db: &Database) -> Result<()> {
+    let rtx = db.begin_read()?;
+    let records: Vec<FrameRecord> = match rtx.open_table(FRAMES) {
+        Ok(t) => tables::scan_json(&t)?.into_iter().map(|(_, r)| r).collect(),
+        Err(TableError::TableDoesNotExist(_)) => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let entries = pool::list_objects(cfg)?;
+    let total = entries.len();
+    let on_disk: HashSet<&OsStr> = entries.iter().map( std::ffi::OsString::as_os_str).collect();
+    let mut known = HashSet::new();
+    for rec in &records {
+        let d = rec.state.durability();
+        for o in rec.state.objects() {
+            if o.location(d) == ObjectLocation::Pool {
+                known.insert(o.name());
+            }
+        }
+    }
+    let orphan_count = entries
+        .iter()
+        .filter(|e| e.to_str().is_none_or(|n| !known.contains(n)))
+        .count();
+    check_orphan_breaker(cfg, orphan_count, total)?;
+
+    for rec in &records {
+        if let FrameState::Committed {
+            durability,
+            objects,
+            ..
+        } = &rec.state
+        {
+            for o in objects {
+                if o.location(*durability) == ObjectLocation::Pool {
+                    let name = o.name();
+                    if !on_disk.contains(OsStr::new(&name)) {
+                        return Err(MetaError::MissingCommittedObject {
+                            frame_id: rec.frame_id,
+                            object_name: name,
+                        });
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
 /// R1 in a single durable transaction.
-fn r1_epoch_boot_pins(db: &Database, current_boot: BootId, now_ms: u64) -> Result<R1Outcome> {
+fn r1_epoch_boot_pins(
+    db: &Database,
+    current_boot: BootId,
+    now_ms: u64,
+    now_instant: Instant,
+) -> Result<R1Outcome> {
     let tx = begin_write(db)?;
     ensure_tables(&tx)?;
     let out = {
@@ -99,6 +209,7 @@ fn r1_epoch_boot_pins(db: &Database, current_boot: BootId, now_ms: u64) -> Resul
                     durability: FrameDurability::Volatile,
                     boot_id,
                     objects,
+                    owner,
                     ..
                 } if *boot_id != current_boot => {
                     let next = FrameRecord {
@@ -108,6 +219,7 @@ fn r1_epoch_boot_pins(db: &Database, current_boot: BootId, now_ms: u64) -> Resul
                             objects: objects.clone(),
                             reason: DeleteReason::StaleBoot,
                             marked_at_ms: now_ms,
+                            owner: Some(owner.clone()),
                         },
                     };
                     tables::put_json(&mut frames, &key, &next)?;
@@ -124,9 +236,9 @@ fn r1_epoch_boot_pins(db: &Database, current_boot: BootId, now_ms: u64) -> Resul
 
         // §7.3: pin leases restart from `now`, so downtime never expires retained frames.
         let mut pins_renewed = 0;
+        let mut pin_leases = HashMap::new();
         for (key, hold) in tables::scan_json::<Hold, _>(&holds)? {
-            let frame = FrameId::from_base32(&key[..aos_types::id::BASE32_LEN])
-                .map_err(|e| MetaError::Codec(format!("hold key {key:?}: {e}")))?;
+            let frame = tables::parse_hold_key_frame(&key)?;
             if !committed.contains(&frame) {
                 holds.remove(key.as_str())?;
                 continue;
@@ -138,13 +250,18 @@ fn r1_epoch_boot_pins(db: &Database, current_boot: BootId, now_ms: u64) -> Resul
                 ..
             } = hold
             {
+                let expires_at_ms = now_ms.saturating_add(lease_ttl_ms);
                 let renewed = Hold::Pin {
-                    pin_id,
-                    owner,
+                    pin_id: pin_id.clone(),
+                    owner: owner.clone(),
                     lease_ttl_ms,
-                    expires_at_ms: now_ms.saturating_add(lease_ttl_ms),
+                    expires_at_ms,
                 };
                 tables::put_json(&mut holds, &key, &renewed)?;
+                pin_leases.insert(
+                    (frame, pin_id),
+                    PinLease::new(owner, lease_ttl_ms, expires_at_ms, now_ms, now_instant),
+                );
                 pins_renewed += 1;
             }
         }
@@ -153,6 +270,7 @@ fn r1_epoch_boot_pins(db: &Database, current_boot: BootId, now_ms: u64) -> Resul
             boot_changed,
             volatile_expired,
             pins_renewed,
+            pin_leases,
         }
     };
     tx.commit()?;
@@ -171,15 +289,16 @@ impl MetaEngine {
         hooks: Box<dyn RecoveryHooks>,
         clock: Arc<dyn Clock>,
     ) -> Result<(Self, RecoverySummary)> {
-        // R0
+        // R0 + read-only R6 pre-flight check (before any redb mutation or object deletion)
         validate_config(&cfg)?;
         pool::prepare_dirs(&cfg)?;
         pool::check_filesystems(&cfg)?;
         let lock = pool::acquire_lock(&cfg)?;
         let (db, pool_id) = pool::open_or_init_db(&cfg)?;
+        preflight_r6_check(&cfg, &db)?;
 
         // R1
-        let r1 = r1_epoch_boot_pins(&db, current_boot, clock.now_ms())?;
+        let r1 = r1_epoch_boot_pins(&db, current_boot, clock.now_ms(), clock.now_instant())?;
         let mut engine = MetaEngine {
             cfg,
             db,
@@ -189,7 +308,7 @@ impl MetaEngine {
             hooks,
             clock,
             world_leases: HashMap::new(),
-            pin_leases: HashMap::new(),
+            pin_leases: r1.pin_leases,
             _lock: lock,
         };
         let mut s = RecoverySummary {
@@ -271,9 +390,18 @@ impl MetaEngine {
             let mut frames = tx.open_table(FRAMES)?;
             let mut holds = tx.open_table(HOLDS)?;
             let mut idem = tx.open_table(IDEMPOTENCY)?;
-            for id in &ids {
-                frames.remove(frame_key(id).as_str())?;
-                tables::clear_holds(&mut holds, id)?;
+            for rec in &preparing {
+                frames.remove(frame_key(&rec.frame_id).as_str())?;
+                tables::clear_holds(&mut holds, &rec.frame_id)?;
+                if let FrameState::Preparing {
+                    parent: Some(p), ..
+                } = rec.state
+                {
+                    let hold = Hold::PreparingParent {
+                        child_frame: rec.frame_id,
+                    };
+                    holds.remove(hold_key(&p, &hold).as_str())?;
+                }
             }
             for (key, r) in tables::scan_json::<IdempotencyRecord, _>(&idem)? {
                 if r.prepared_frame.is_some_and(|f| ids.contains(&f)) {
@@ -308,6 +436,7 @@ impl MetaEngine {
                                     objects: rec.state.objects().to_vec(),
                                     reason: DeleteReason::Reclaimed,
                                     marked_at_ms: now,
+                                    owner: rec.state.owner().map(str::to_owned),
                                 },
                             };
                             tables::put_json(&mut frames, &key, &next)?;
@@ -337,8 +466,9 @@ impl MetaEngine {
     /// R6: move unreferenced `objects/` entries into `quarantine/epoch-<n>/`, unless there are
     /// so many that the metadata itself is suspect (then touch nothing and refuse to start).
     fn r6_quarantine_orphans(&mut self, s: &mut RecoverySummary) -> Result<()> {
+        let frames = self.frames()?;
         let mut known = HashSet::new();
-        for rec in self.frames()? {
+        for rec in &frames {
             let d = rec.state.durability();
             for o in rec.state.objects() {
                 if o.location(d) == ObjectLocation::Pool {
@@ -349,20 +479,33 @@ impl MetaEngine {
         let entries = pool::list_objects(&self.cfg)?;
         let total = entries.len();
         s.objects_scanned = total;
+        let on_disk: HashSet<&OsStr> = entries.iter().map(std::ffi::OsString::as_os_str).collect();
         let orphans: Vec<_> = entries
-            .into_iter()
+            .iter()
             .filter(|e| e.to_str().is_none_or(|n| !known.contains(n)))
+            .cloned()
             .collect();
         let n = orphans.len();
-        #[allow(clippy::cast_precision_loss)]
-        let ratio_tripped = total >= self.cfg.min_orphan_ratio_sample
-            && total > 0
-            && (n as f64 / total as f64) > self.cfg.max_orphan_ratio;
-        if n > self.cfg.max_orphan_count || ratio_tripped {
-            return Err(MetaError::OrphanCircuitBreakerTriggered {
-                orphan_count: n,
-                total_objects: total,
-            });
+        check_orphan_breaker(&self.cfg, n, total)?;
+        for rec in &frames {
+            if let FrameState::Committed {
+                durability,
+                objects,
+                ..
+            } = &rec.state
+            {
+                for o in objects {
+                    if o.location(*durability) == ObjectLocation::Pool {
+                        let name = o.name();
+                        if !on_disk.contains(OsStr::new(&name)) {
+                            return Err(MetaError::MissingCommittedObject {
+                                frame_id: rec.frame_id,
+                                object_name: name,
+                            });
+                        }
+                    }
+                }
+            }
         }
         if n == 0 {
             return Ok(());
@@ -376,6 +519,11 @@ impl MetaEngine {
             .iter()
             .map(|o| QuarantineRecord {
                 name: o.to_string_lossy().into_owned(),
+                raw_name: if o.to_str().is_some() {
+                    None
+                } else {
+                    Some(o.clone())
+                },
                 quarantined_epoch: self.epoch,
                 quarantined_at_ms: now,
                 purge_after_ms: now.saturating_add(self.cfg.quarantine_grace_ms),

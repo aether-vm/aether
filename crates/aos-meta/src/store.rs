@@ -17,7 +17,7 @@ use crate::lease::{PinLease, WorldLease};
 use crate::model::{
     DeleteReason, FencingToken, FrameDurability, FrameRecord, FrameState, Hold, IdempotencyKey,
     Labels, ManagedObject, ObjectKind, ObjectLocation, PinSpec, PoolId, QuarantineRecord,
-    WorldRecord, validate_labels, validate_name,
+    TimelineRecord, WorldRecord, validate_labels, validate_name,
 };
 use crate::pool::PoolLock;
 use crate::tables::{
@@ -298,10 +298,15 @@ fn timeline_cas(
     timelines: &mut RawTable<'_>,
     holds: &mut RawTable<'_>,
     name: &str,
+    owner: &str,
     expected: Option<FrameId>,
     new_head: FrameId,
 ) -> Result<TimelineAdvance> {
-    let current: Option<FrameId> = tables::get_json(timelines, name)?;
+    let existing: Option<TimelineRecord> = tables::get_json(timelines, name)?;
+    if let Some(rec) = &existing {
+        check_owner(|| format!("timeline {name:?}"), &rec.owner, owner)?;
+    }
+    let current = existing.map(|r| r.head);
     if current != expected {
         return Err(MetaError::TimelineCasMismatch {
             timeline: name.to_owned(),
@@ -316,7 +321,11 @@ fn timeline_cas(
         holds.remove(hold_key(&old, &hold).as_str())?;
     }
     tables::put_json(holds, &hold_key(&new_head, &hold), &hold)?;
-    tables::put_json(timelines, name, &new_head)?;
+    let next = TimelineRecord {
+        head: new_head,
+        owner: owner.to_owned(),
+    };
+    tables::put_json(timelines, name, &next)?;
     Ok(TimelineAdvance {
         timeline: name.to_owned(),
         previous: current,
@@ -391,6 +400,13 @@ impl MetaEngine {
 
     /// Current head of a timeline.
     pub fn timeline_head(&self, name: &str) -> Result<Option<FrameId>> {
+        self.read_table(TIMELINES, |t| {
+            Ok(tables::get_json::<TimelineRecord, _>(t, name)?.map(|r| r.head))
+        })
+    }
+
+    /// Full record of a timeline (`head` and `owner`).
+    pub fn timeline(&self, name: &str) -> Result<Option<TimelineRecord>> {
         self.read_table(TIMELINES, |t| tables::get_json(t, name))
     }
 
@@ -443,10 +459,16 @@ impl MetaEngine {
             let mut frames = tx.open_table(FRAMES)?;
             let mut holds = tx.open_table(HOLDS)?;
             let mut pending = tx.open_table(PENDING_RECLAIM)?;
+            let mut idem = tx.open_table(IDEMPOTENCY)?;
             let key = frame_key(&rec.frame_id);
             frames.remove(key.as_str())?;
             pending.remove(key.as_str())?;
             tables::clear_holds(&mut holds, &rec.frame_id)?;
+            for (ik, r) in tables::scan_json::<IdempotencyRecord, _>(&idem)? {
+                if r.prepared_frame == Some(rec.frame_id) {
+                    idem.remove(ik.as_str())?;
+                }
+            }
         }
         tx.commit()?;
         Ok(())
@@ -476,13 +498,21 @@ impl MetaEngine {
         let tx = begin_write(&self.db)?;
         let prepared = {
             let mut idem_t = tx.open_table(IDEMPOTENCY)?;
+            let mut frames = tx.open_table(FRAMES)?;
             if let Some(resp) = idem_lookup(&idem_t, idem, OP, digest.as_ref())? {
                 return match resp {
-                    IdemResponse::Prepared(p) => Ok(p),
+                    IdemResponse::Prepared(p) => match tables::load_frame(&frames, &p.frame_id)? {
+                        Some(FrameRecord {
+                            state: FrameState::Preparing { .. } | FrameState::Committed { .. },
+                            ..
+                        }) => Ok(p),
+                        _ => Err(MetaError::PreparedFrameAborted(p.frame_id)),
+                    },
                     _ => Err(replay_mismatch()),
                 };
             }
-            let mut frames = tx.open_table(FRAMES)?;
+            let pending = tx.open_table(PENDING_RECLAIM)?;
+            let mut holds = tx.open_table(HOLDS)?;
             if let Some(sw) = &req.source_world {
                 let worlds = tx.open_table(WORLDS)?;
                 let w = tables::load_world(&worlds, &sw.world_id)?
@@ -491,6 +521,7 @@ impl MetaEngine {
                 if !w.state.is_running() {
                     return Err(MetaError::WorldNotRunning(sw.world_id));
                 }
+                self.live_lease(sw.world_id, &req.owner, sw.token)?;
             }
             let mut promotion = false;
             if let Some(p) = req.parent {
@@ -499,11 +530,16 @@ impl MetaEngine {
                     durability: pdur,
                     boot_id,
                     objects,
+                    owner: parent_owner,
                     ..
                 } = &prec.state
                 else {
                     return Err(wrong_state(p, "Committed", &prec.state));
                 };
+                check_owner(|| format!("frame {p}"), parent_owner, &req.owner)?;
+                if pending.get(frame_key(&p).as_str())?.is_some() {
+                    return Err(MetaError::FrameMarkedForDeletion(p));
+                }
                 if *pdur == FrameDurability::Volatile {
                     if *boot_id != self.boot {
                         return Err(MetaError::StaleBoot {
@@ -541,6 +577,12 @@ impl MetaEngine {
                 },
             };
             tables::put_json(&mut frames, &frame_key(&frame_id), &rec)?;
+            if let Some(p) = req.parent {
+                let hold = Hold::PreparingParent {
+                    child_frame: frame_id,
+                };
+                tables::put_json(&mut holds, &hold_key(&p, &hold), &hold)?;
+            }
             let prepared = PreparedFrame {
                 frame_id,
                 durability: req.durability,
@@ -584,7 +626,7 @@ impl MetaEngine {
                         )));
                     }
                     let want_kind = if obj.kind.is_dir() {
-                        ProofKind::Dir
+                        ProofKind::Subvolume
                     } else {
                         ProofKind::FileAndParent
                     };
@@ -597,6 +639,9 @@ impl MetaEngine {
                             want_path.display()
                         )));
                     }
+                    p.proof().verify_unchanged().map_err(|err| {
+                        reject(format!("proof for {obj} failed verify_unchanged: {err}"))
+                    })?;
                     obj
                 }
                 ObjectProof::Ephemeral(e) => {
@@ -606,7 +651,13 @@ impl MetaEngine {
                             e.into_inner_for_cleanup()
                         )));
                     }
-                    *e.get_at(&self.boot).map_err(|err| reject(err.to_string()))?
+                    let obj = *e.get_at(&self.boot).map_err(|err| reject(err.to_string()))?;
+                    if obj.location(durability) != ObjectLocation::VolatileTmpfs {
+                        return Err(reject(format!(
+                            "{obj} lives in the pool and requires a Persisted proof even on a volatile frame"
+                        )));
+                    }
+                    obj
                 }
             };
             if !expected.contains(&obj) {
@@ -633,13 +684,15 @@ impl MetaEngine {
         const OP: &str = "commit_frame";
         validate_name("owner", &req.owner)?;
         if let Some(pin) = &req.pin {
-            validate_pin(pin)?;
+            validate_pin(pin, self.cfg.max_pin_ttl_ms)?;
+            check_owner(|| format!("frame {}", req.frame_id), &req.owner, &pin.owner)?;
         }
         if let Some(tl) = &req.timeline {
             validate_name("timeline", &tl.timeline)?;
         }
         let digest = idem_prepare(idem, &req.owner, OP, req)?;
         let now = self.now_ms();
+        let now_inst = self.clock.now_instant();
 
         let tx = begin_write(&self.db)?;
         let (out, pin_lease) = {
@@ -678,6 +731,10 @@ impl MetaEngine {
                     )
                 })?;
                 check_fence(&wr, &req.owner, token)?;
+                if !wr.state.is_running() {
+                    return Err(MetaError::WorldNotRunning(w));
+                }
+                self.live_lease(w, &req.owner, token)?;
             }
             if durability == FrameDurability::Volatile && boot_id != self.boot {
                 return Err(MetaError::StaleBoot {
@@ -706,6 +763,12 @@ impl MetaEngine {
                 },
             };
             tables::put_json(&mut frames, &frame_key(&req.frame_id), &committed)?;
+            if let Some(p) = parent {
+                let hold = Hold::PreparingParent {
+                    child_frame: req.frame_id,
+                };
+                holds.remove(hold_key(&p, &hold).as_str())?;
+            }
 
             let mut pin_lease = None;
             if let Some(pin) = &req.pin {
@@ -726,6 +789,7 @@ impl MetaEngine {
                         &mut timelines,
                         &mut holds,
                         &tl.timeline,
+                        &req.owner,
                         tl.expected_old,
                         req.frame_id,
                     )?)
@@ -753,7 +817,7 @@ impl MetaEngine {
         if let Some((pin, expires)) = pin_lease {
             self.pin_leases.insert(
                 (req.frame_id, pin.pin_id),
-                PinLease::new(pin.owner, pin.lease_ttl_ms, expires, now),
+                PinLease::new(pin.owner, pin.lease_ttl_ms, expires, now, now_inst),
             );
         }
         Ok(out)
@@ -762,23 +826,20 @@ impl MetaEngine {
     // ======================================================================== timelines
 
     /// Atomically move a timeline head (durable committed frames only), transferring the
-    /// `TimelineHead` hold.
+    /// `TimelineHead` hold. The first writer becomes the timeline owner; only the owner may
+    /// advance it, and only onto frames owned by the caller.
     pub fn advance_timeline_cas(
         &mut self,
         timeline: &str,
+        owner: &str,
         expected_old: Option<FrameId>,
         new_head: FrameId,
         idem: Option<&IdempotencyKey>,
     ) -> Result<TimelineAdvance> {
         const OP: &str = "advance_timeline";
         validate_name("timeline", timeline)?;
-        let digest = match idem {
-            Some(k) => {
-                validate_key(k, &k.owner)?;
-                Some(request_digest(OP, &(timeline, expected_old, new_head))?)
-            }
-            None => None,
-        };
+        validate_name("owner", owner)?;
+        let digest = idem_prepare(idem, owner, OP, &(timeline, owner, expected_old, new_head))?;
         let now = self.now_ms();
         let tx = begin_write(&self.db)?;
         let out = {
@@ -798,13 +859,24 @@ impl MetaEngine {
             if rec.state.durability() == FrameDurability::Volatile {
                 return Err(MetaError::VolatileInTimelineForbidden(new_head));
             }
-            if !matches!(rec.state, FrameState::Committed { .. }) {
+            let FrameState::Committed {
+                owner: frame_owner, ..
+            } = &rec.state
+            else {
                 return Err(wrong_state(new_head, "Committed", &rec.state));
-            }
+            };
+            check_owner(|| format!("frame {new_head}"), frame_owner, owner)?;
             if pending.get(frame_key(&new_head).as_str())?.is_some() {
                 return Err(MetaError::FrameMarkedForDeletion(new_head));
             }
-            let out = timeline_cas(&mut timelines, &mut holds, timeline, expected_old, new_head)?;
+            let out = timeline_cas(
+                &mut timelines,
+                &mut holds,
+                timeline,
+                owner,
+                expected_old,
+                new_head,
+            )?;
             idem_store(
                 &mut idem_t,
                 idem,
@@ -820,13 +892,59 @@ impl MetaEngine {
         Ok(out)
     }
 
+    /// Delete a timeline (owner-checked), releasing its `TimelineHead` hold on the former head.
+    pub fn delete_timeline(
+        &mut self,
+        timeline: &str,
+        owner: &str,
+        idem: Option<&IdempotencyKey>,
+    ) -> Result<FrameId> {
+        const OP: &str = "delete_timeline";
+        validate_name("timeline", timeline)?;
+        validate_name("owner", owner)?;
+        let digest = idem_prepare(idem, owner, OP, &(timeline, owner))?;
+        let now = self.now_ms();
+        let tx = begin_write(&self.db)?;
+        let head = {
+            let mut idem_t = tx.open_table(IDEMPOTENCY)?;
+            if let Some(resp) = idem_lookup(&idem_t, idem, OP, digest.as_ref())? {
+                return match resp {
+                    IdemResponse::TimelineDeleted(f) => Ok(f),
+                    _ => Err(replay_mismatch()),
+                };
+            }
+            let mut timelines = tx.open_table(TIMELINES)?;
+            let mut holds = tx.open_table(HOLDS)?;
+            let rec: TimelineRecord = tables::get_json(&timelines, timeline)?
+                .ok_or_else(|| MetaError::TimelineNotFound(timeline.to_owned()))?;
+            check_owner(|| format!("timeline {timeline:?}"), &rec.owner, owner)?;
+            let hold = Hold::TimelineHead {
+                timeline_name: timeline.to_owned(),
+            };
+            holds.remove(hold_key(&rec.head, &hold).as_str())?;
+            timelines.remove(timeline)?;
+            idem_store(
+                &mut idem_t,
+                idem,
+                OP,
+                digest.as_ref(),
+                IdemResponse::TimelineDeleted(rec.head),
+                now,
+                None,
+            )?;
+            rec.head
+        };
+        tx.commit()?;
+        Ok(head)
+    }
+
     // ======================================================================== delete
 
     /// Delete a frame. Unheld committed frames (and aborted `Preparing` frames) are deleted now;
     /// held frames are marked and reclaimed by [`Self::collect_garbage`] once unheld.
     ///
     /// If an object cannot be destroyed the frame stays `Deleting` and the hook error is
-    /// returned; recovery (R5) and GC resume the deletion.
+    /// returned; recovery (R5), GC, and idempotent retries resume the deletion.
     pub fn delete_frame(
         &mut self,
         frame: FrameId,
@@ -838,69 +956,87 @@ impl MetaEngine {
         let digest = idem_prepare(idem, owner, OP, &(frame, owner))?;
         let now = self.now_ms();
         let tx = begin_write(&self.db)?;
-        let (outcome, to_delete) = {
+        let (outcome, to_delete, is_replay) = {
             let mut idem_t = tx.open_table(IDEMPOTENCY)?;
-            if let Some(resp) = idem_lookup(&idem_t, idem, OP, digest.as_ref())? {
-                return match resp {
-                    IdemResponse::Deleted(d) => Ok(d),
-                    _ => Err(replay_mismatch()),
-                };
-            }
             let mut frames = tx.open_table(FRAMES)?;
-            let mut pending = tx.open_table(PENDING_RECLAIM)?;
-            let holds = tx.open_table(HOLDS)?;
-            let rec =
-                tables::load_frame(&frames, &frame)?.ok_or(MetaError::FrameNotFound(frame))?;
-            if let Some(o) = rec.state.owner() {
-                check_owner(|| format!("frame {frame}"), o, owner)?;
-            }
-            let deleting = |reason| FrameRecord {
-                frame_id: frame,
-                state: FrameState::Deleting {
-                    durability: rec.state.durability(),
-                    objects: rec.state.objects().to_vec(),
-                    reason,
-                    marked_at_ms: now,
-                },
-            };
-            let (outcome, next) = match &rec.state {
-                FrameState::Preparing { .. } => (
-                    DeleteOutcome::Deleted,
-                    Some(deleting(DeleteReason::Aborted { by: owner.into() })),
-                ),
-                FrameState::Committed { .. } => {
-                    let n = tables::holds_of(&holds, &frame)?.len();
-                    if n > 0 {
-                        let mark = ReclaimMark {
-                            requested_by: owner.into(),
-                            requested_at_ms: now,
-                        };
-                        tables::put_json(&mut pending, &frame_key(&frame), &mark)?;
-                        (DeleteOutcome::Deferred { holds: n }, None)
-                    } else {
+            if let Some(resp) = idem_lookup(&idem_t, idem, OP, digest.as_ref())? {
+                let IdemResponse::Deleted(d) = resp else {
+                    return Err(replay_mismatch());
+                };
+                let still_deleting = tables::load_frame(&frames, &frame)?
+                    .filter(|r| matches!(r.state, FrameState::Deleting { .. }));
+                (d, still_deleting, true)
+            } else {
+                let mut pending = tx.open_table(PENDING_RECLAIM)?;
+                let mut holds = tx.open_table(HOLDS)?;
+                let rec = tables::load_frame(&frames, &frame)?
+                    .ok_or(MetaError::FrameNotFound(frame))?;
+                if let Some(o) = rec.state.owner() {
+                    check_owner(|| format!("frame {frame}"), o, owner)?;
+                }
+                let deleting = |reason| FrameRecord {
+                    frame_id: frame,
+                    state: FrameState::Deleting {
+                        durability: rec.state.durability(),
+                        objects: rec.state.objects().to_vec(),
+                        reason,
+                        marked_at_ms: now,
+                        owner: rec
+                            .state
+                            .owner()
+                            .map(str::to_owned)
+                            .or_else(|| Some(owner.to_owned())),
+                    },
+                };
+                let (outcome, next) = match &rec.state {
+                    FrameState::Preparing { parent, .. } => {
+                        if let Some(p) = parent {
+                            let hold = Hold::PreparingParent { child_frame: frame };
+                            holds.remove(hold_key(p, &hold).as_str())?;
+                        }
                         (
                             DeleteOutcome::Deleted,
-                            Some(deleting(DeleteReason::Requested { by: owner.into() })),
+                            Some(deleting(DeleteReason::Aborted { by: owner.into() })),
                         )
                     }
+                    FrameState::Committed { .. } => {
+                        let n = tables::holds_of(&holds, &frame)?.len();
+                        if n > 0 {
+                            let mark = ReclaimMark {
+                                requested_by: owner.into(),
+                                requested_at_ms: now,
+                            };
+                            tables::put_json(&mut pending, &frame_key(&frame), &mark)?;
+                            (DeleteOutcome::Deferred { holds: n }, None)
+                        } else {
+                            (
+                                DeleteOutcome::Deleted,
+                                Some(deleting(DeleteReason::Requested { by: owner.into() })),
+                            )
+                        }
+                    }
+                    FrameState::Deleting { .. } => (DeleteOutcome::Deleted, Some(rec.clone())),
+                };
+                if let Some(next) = &next {
+                    tables::put_json(&mut frames, &frame_key(&frame), next)?;
                 }
-                FrameState::Deleting { .. } => (DeleteOutcome::Deleted, Some(rec.clone())),
-            };
-            if let Some(next) = &next {
-                tables::put_json(&mut frames, &frame_key(&frame), next)?;
+                idem_store(
+                    &mut idem_t,
+                    idem,
+                    OP,
+                    digest.as_ref(),
+                    IdemResponse::Deleted(outcome.clone()),
+                    now,
+                    None,
+                )?;
+                (outcome, next, false)
             }
-            idem_store(
-                &mut idem_t,
-                idem,
-                OP,
-                digest.as_ref(),
-                IdemResponse::Deleted(outcome.clone()),
-                now,
-                None,
-            )?;
-            (outcome, next)
         };
-        tx.commit()?;
+        if is_replay {
+            drop(tx);
+        } else {
+            tx.commit()?;
+        }
         if let Some(rec) = to_delete {
             self.pin_leases.retain(|(f, _), _| *f != frame);
             self.complete_deletion(&rec)?;
@@ -913,7 +1049,9 @@ impl MetaEngine {
     /// Expire pins, reclaim unheld frames marked for deletion, finish pending deletions, purge
     /// quarantine entries past their grace period and drop stale tombstones / idempotency
     /// records.
-    pub fn collect_garbage(&mut self, now_ms: u64) -> Result<GcReport> {
+    pub fn collect_garbage(&mut self, _now_ms: u64) -> Result<GcReport> {
+        let now_ms = self.now_ms();
+        let now_inst = self.clock.now_instant();
         let mut report = GcReport::default();
 
         // 1. pins + 2. deferred deletes, in one transaction.
@@ -932,13 +1070,12 @@ impl MetaEngine {
                 else {
                     continue;
                 };
-                let frame = FrameId::from_base32(&key[..aos_types::id::BASE32_LEN])
-                    .map_err(|e| MetaError::Codec(format!("hold key {key:?}: {e}")))?;
-                let high = self
-                    .pin_leases
-                    .get(&(frame, pin_id.clone()))
-                    .map_or(0, |l| l.high_ms);
-                if (*expires_at_ms).max(high) <= now_ms {
+                let frame = tables::parse_hold_key_frame(&key)?;
+                let expired = match self.pin_leases.get(&(frame, pin_id.clone())) {
+                    Some(lease) => lease.expires_at <= now_inst,
+                    None => *expires_at_ms <= now_ms,
+                };
+                if expired {
                     holds.remove(key.as_str())?;
                     expired_pins.push((frame, pin_id.clone()));
                 }
@@ -960,6 +1097,7 @@ impl MetaEngine {
                                     objects: rec.state.objects().to_vec(),
                                     reason: DeleteReason::Reclaimed,
                                     marked_at_ms: now_ms,
+                                    owner: rec.state.owner().map(str::to_owned),
                                 },
                             };
                             tables::put_json(&mut frames, &key, &next)?;
@@ -999,7 +1137,7 @@ impl MetaEngine {
             let qroot = self.cfg.quarantine_dir();
             for r in &due {
                 let dir = qroot.join(r.quarantined_epoch.cgroup_dir_name());
-                ignore_not_found(self.hooks.purge_quarantined(&dir.join(&r.name))).map_err(
+                ignore_not_found(self.hooks.purge_quarantined(&dir.join(r.file_name()))).map_err(
                     |source| MetaError::Hook {
                         stage: "purge_quarantined",
                         source,
@@ -1045,11 +1183,14 @@ impl MetaEngine {
     }
 }
 
-pub(crate) fn validate_pin(pin: &PinSpec) -> Result<()> {
+pub(crate) fn validate_pin(pin: &PinSpec, max_pin_ttl_ms: u64) -> Result<()> {
     validate_name("pin id", &pin.pin_id)?;
     validate_name("pin owner", &pin.owner)?;
-    if pin.lease_ttl_ms == 0 {
-        return Err(MetaError::InvalidArgument("pin lease_ttl_ms must be > 0".into()));
+    if pin.lease_ttl_ms == 0 || pin.lease_ttl_ms > max_pin_ttl_ms {
+        return Err(MetaError::InvalidArgument(format!(
+            "pin lease_ttl_ms {} must be within 1..={max_pin_ttl_ms}",
+            pin.lease_ttl_ms
+        )));
     }
     Ok(())
 }

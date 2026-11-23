@@ -147,6 +147,13 @@ impl ManualClock {
         let mut s = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.0 = s.0.saturating_add(ms);
     }
+
+    /// Step only the wall clock backward (or set it to an arbitrary timestamp); monotonic time is
+    /// unchanged.
+    pub fn set_wall(&self, wall_ms: u64) {
+        let mut s = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        s.0 = wall_ms;
+    }
 }
 
 impl Clock for ManualClock {

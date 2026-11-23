@@ -170,7 +170,7 @@ impl Harness {
     pub fn persisted(&self, o: &ManagedObject) -> Persisted<ManagedObject> {
         let p = self.objects_dir().join(o.name());
         let proof = if o.kind == ObjectKind::TreeSubvol {
-            PersistProof::fsync_dir(&p).unwrap()
+            PersistProof::fsync_subvolume(&p).unwrap()
         } else {
             PersistProof::fsync_file_and_parent(&p).unwrap()
         };

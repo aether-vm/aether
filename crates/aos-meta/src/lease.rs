@@ -36,21 +36,31 @@ pub(crate) struct WorldLease {
 pub(crate) struct PinLease {
     owner: String,
     ttl_ms: u64,
+    /// Monotonic expiry of the live in-memory pin lease.
+    pub(crate) expires_at: Instant,
+    /// Monotonic instant when this pin was last flushed to `redb`.
+    last_flush_at: Instant,
     /// Latest renewal (memory only until flushed).
     pub(crate) high_ms: u64,
     /// Value currently stored in `redb`.
     persisted_ms: u64,
-    last_flush_ms: u64,
 }
 
 impl PinLease {
-    pub(crate) fn new(owner: String, ttl_ms: u64, expires_ms: u64, now_ms: u64) -> Self {
+    pub(crate) fn new(
+        owner: String,
+        ttl_ms: u64,
+        expires_ms: u64,
+        _now_ms: u64,
+        now_instant: Instant,
+    ) -> Self {
         Self {
             owner,
             ttl_ms,
+            expires_at: now_instant + Duration::from_millis(ttl_ms),
+            last_flush_at: now_instant,
             high_ms: expires_ms,
             persisted_ms: expires_ms,
-            last_flush_ms: now_ms,
         }
     }
 }
@@ -116,8 +126,11 @@ impl MetaEngine {
         const OP: &str = "create_world";
         validate_name("owner", &req.owner)?;
         validate_labels(&req.labels)?;
-        if req.lease_ttl_ms == 0 {
-            return Err(MetaError::InvalidArgument("lease_ttl_ms must be > 0".into()));
+        if req.lease_ttl_ms == 0 || req.lease_ttl_ms > self.cfg.max_world_lease_ttl_ms {
+            return Err(MetaError::InvalidArgument(format!(
+                "lease_ttl_ms {} must be within 1..={}",
+                req.lease_ttl_ms, self.cfg.max_world_lease_ttl_ms
+            )));
         }
         let digest = idem_prepare(idem, &req.owner, OP, req)?;
         let now = self.now_ms();
@@ -129,7 +142,12 @@ impl MetaEngine {
                 let IdemResponse::World(id) = resp else {
                     return Err(MetaError::Codec("unexpected replay response".into()));
                 };
-                return tables::load_world(&worlds, &id)?.ok_or(MetaError::WorldNotFound(id));
+                let mut w =
+                    tables::load_world(&worlds, &id)?.ok_or(MetaError::WorldNotFound(id))?;
+                // Always return the token originally issued to create_world, never a post-takeover
+                // token (§7.3 fencing).
+                w.fencing_token = FencingToken::FIRST;
+                return Ok(w);
             }
             let frames = tx.open_table(FRAMES)?;
             let pending = tx.open_table(PENDING_RECLAIM)?;
@@ -139,11 +157,17 @@ impl MetaEngine {
             let FrameState::Committed {
                 durability,
                 boot_id,
+                owner: base_owner,
                 ..
             } = &base.state
             else {
                 return Err(wrong_state(req.base_frame, "Committed", &base.state));
             };
+            check_owner(
+                || format!("frame {}", req.base_frame),
+                base_owner,
+                &req.owner,
+            )?;
             if *durability == FrameDurability::Volatile && *boot_id != self.boot {
                 return Err(MetaError::StaleBoot {
                     frame: req.base_frame,
@@ -195,7 +219,12 @@ impl MetaEngine {
         Ok(rec)
     }
 
-    fn live_lease(&self, world: WorldId, owner: &str, token: FencingToken) -> Result<&WorldLease> {
+    pub(crate) fn live_lease(
+        &self,
+        world: WorldId,
+        owner: &str,
+        token: FencingToken,
+    ) -> Result<&WorldLease> {
         let lease = self
             .world_leases
             .get(&world)
@@ -240,13 +269,19 @@ impl MetaEngine {
     /// Take over a world: persist `fencing_token + 1` and return it. Every later call with an
     /// older token is [`MetaError::FencedOut`].
     pub fn acquire_world_fence(&mut self, world: WorldId, owner: &str) -> Result<FencingToken> {
+        let now_inst = self.clock.now_instant();
         let tx = begin_write(&self.db)?;
         let token = {
             let mut worlds = tx.open_table(WORLDS)?;
             let mut w =
                 tables::load_world(&worlds, &world)?.ok_or(MetaError::WorldNotFound(world))?;
             check_owner(|| format!("world {world}"), &w.owner, owner)?;
-            if !w.state.is_running() {
+            if !w.state.is_running()
+                || self
+                    .world_leases
+                    .get(&world)
+                    .is_none_or(|l| l.expires_at <= now_inst)
+            {
                 return Err(MetaError::WorldNotRunning(world));
             }
             w.fencing_token = w
@@ -394,8 +429,9 @@ impl MetaEngine {
 
     /// Attach (or refresh) a pin on a committed frame.
     pub fn pin_frame(&mut self, frame: FrameId, spec: &PinSpec) -> Result<Hold> {
-        validate_pin(spec)?;
+        validate_pin(spec, self.cfg.max_pin_ttl_ms)?;
         let now = self.now_ms();
+        let now_inst = self.clock.now_instant();
         let expires = now.saturating_add(spec.lease_ttl_ms);
         let hold = Hold::Pin {
             pin_id: spec.pin_id.clone(),
@@ -410,9 +446,13 @@ impl MetaEngine {
             let mut holds = tx.open_table(HOLDS)?;
             let rec =
                 tables::load_frame(&frames, &frame)?.ok_or(MetaError::FrameNotFound(frame))?;
-            if !matches!(rec.state, FrameState::Committed { .. }) {
+            let FrameState::Committed {
+                owner: frame_owner, ..
+            } = &rec.state
+            else {
                 return Err(wrong_state(frame, "Committed", &rec.state));
-            }
+            };
+            check_owner(|| format!("frame {frame}"), frame_owner, &spec.owner)?;
             if pending.get(frame_key(&frame).as_str())?.is_some() {
                 return Err(MetaError::FrameMarkedForDeletion(frame));
             }
@@ -425,7 +465,13 @@ impl MetaEngine {
         tx.commit()?;
         self.pin_leases.insert(
             (frame, spec.pin_id.clone()),
-            PinLease::new(spec.owner.clone(), spec.lease_ttl_ms, expires, now),
+            PinLease::new(
+                spec.owner.clone(),
+                spec.lease_ttl_ms,
+                expires,
+                now,
+                now_inst,
+            ),
         );
         Ok(hold)
     }
@@ -484,9 +530,10 @@ impl MetaEngine {
                 });
             };
             let now = self.now_ms();
+            let now_inst = self.clock.now_instant();
             self.pin_leases.insert(
                 k.clone(),
-                PinLease::new(owner, lease_ttl_ms, expires_at_ms, now),
+                PinLease::new(owner, lease_ttl_ms, expires_at_ms, now, now_inst),
             );
         }
         Ok(self.pin_leases.get_mut(&k).expect("inserted above"))
@@ -497,21 +544,31 @@ impl MetaEngine {
     /// since the last flush.
     pub fn renew_pin_lease(&mut self, frame: FrameId, pin_id: &str, owner: &str) -> Result<PinRenewal> {
         let now = self.now_ms();
-        let interval = self.cfg.pin_flush_interval_ms;
-        let lease = self.load_pin_lease(frame, pin_id)?;
-        check_owner(|| format!("pin {pin_id:?}"), &lease.owner, owner)?;
-        if lease.high_ms.max(lease.persisted_ms) <= now {
-            return Err(MetaError::PinNotFound {
-                frame,
-                pin_id: pin_id.to_owned(),
-            });
-        }
-        lease.high_ms = now.saturating_add(lease.ttl_ms);
-        let need_flush = lease.persisted_ms.saturating_sub(now) < lease.ttl_ms / 2
-            || now.saturating_sub(lease.last_flush_ms) >= interval;
-        let (high, mut persisted) = (lease.high_ms, lease.persisted_ms);
+        let now_inst = self.clock.now_instant();
+        let interval = Duration::from_millis(self.cfg.pin_flush_interval_ms);
+        let (ttl_ms, new_expires_at, new_high, mut persisted, need_flush) = {
+            let lease = self.load_pin_lease(frame, pin_id)?;
+            check_owner(|| format!("pin {pin_id:?}"), &lease.owner, owner)?;
+            if lease.expires_at <= now_inst {
+                return Err(MetaError::PinNotFound {
+                    frame,
+                    pin_id: pin_id.to_owned(),
+                });
+            }
+            let ttl_ms = lease.ttl_ms;
+            let new_expires_at = now_inst + Duration::from_millis(ttl_ms);
+            // Never allow backward wall-clock steps to shrink high_ms.
+            let new_high = lease
+                .high_ms
+                .max(lease.persisted_ms)
+                .max(now.saturating_add(ttl_ms));
+            let need_flush = lease.persisted_ms.saturating_sub(now) < ttl_ms / 2
+                || now_inst.saturating_duration_since(lease.last_flush_at) >= interval;
+            (ttl_ms, new_expires_at, new_high, lease.persisted_ms, need_flush)
+        };
+        let _ = ttl_ms;
         if need_flush {
-            if self.flush_pins(&[(frame, pin_id.to_owned())])? == 0 {
+            if self.flush_pins(&[(frame, pin_id.to_owned(), new_high)])? == 0 {
                 // Removed from redb behind our back (expired by GC / frame deleted).
                 self.pin_leases.remove(&(frame, pin_id.to_owned()));
                 return Err(MetaError::PinNotFound {
@@ -519,10 +576,14 @@ impl MetaEngine {
                     pin_id: pin_id.to_owned(),
                 });
             }
-            persisted = high;
+            persisted = new_high;
+        }
+        if let Some(lease) = self.pin_leases.get_mut(&(frame, pin_id.to_owned())) {
+            lease.expires_at = new_expires_at;
+            lease.high_ms = lease.high_ms.max(new_high);
         }
         Ok(PinRenewal {
-            expires_at_ms: high,
+            expires_at_ms: new_high,
             persisted_expires_at_ms: persisted,
             flushed: need_flush,
         })
@@ -530,28 +591,28 @@ impl MetaEngine {
 
     /// Persist every in-memory pin renewal not yet in `redb` (graceful shutdown / tests).
     pub fn flush_dirty_pins(&mut self) -> Result<usize> {
-        let dirty: Vec<(FrameId, String)> = self
+        let dirty: Vec<(FrameId, String, u64)> = self
             .pin_leases
             .iter()
             .filter(|(_, l)| l.high_ms > l.persisted_ms)
-            .map(|(k, _)| k.clone())
+            .map(|(k, l)| (k.0, k.1.clone(), l.high_ms))
             .collect();
         self.flush_pins(&dirty)
     }
 
-    fn flush_pins(&mut self, keys: &[(FrameId, String)]) -> Result<usize> {
+    fn flush_pins(&mut self, keys: &[(FrameId, String, u64)]) -> Result<usize> {
         if keys.is_empty() {
             return Ok(0);
         }
-        let now = self.now_ms();
+        let now_inst = self.clock.now_instant();
         let tx = begin_write(&self.db)?;
         let mut flushed = Vec::new();
         {
             let mut holds = tx.open_table(HOLDS)?;
-            for (frame, pin_id) in keys {
-                let Some(lease) = self.pin_leases.get(&(*frame, pin_id.clone())) else {
+            for (frame, pin_id, target_high) in keys {
+                if !self.pin_leases.contains_key(&(*frame, pin_id.clone())) {
                     continue;
-                };
+                }
                 let probe = Hold::Pin {
                     pin_id: pin_id.clone(),
                     owner: String::new(),
@@ -566,22 +627,24 @@ impl MetaEngine {
                     expires_at_ms,
                 }) = tables::get_json::<Hold, _>(&holds, &key)?
                 {
+                    let new_persisted = expires_at_ms.max(*target_high);
                     let updated = Hold::Pin {
                         pin_id: pin_id.clone(),
                         owner,
                         lease_ttl_ms,
-                        expires_at_ms: expires_at_ms.max(lease.high_ms),
+                        expires_at_ms: new_persisted,
                     };
                     tables::put_json(&mut holds, &key, &updated)?;
-                    flushed.push((*frame, pin_id));
+                    flushed.push((*frame, pin_id, new_persisted));
                 }
             }
         }
         tx.commit()?;
-        for k in &flushed {
-            if let Some(l) = self.pin_leases.get_mut(k) {
-                l.persisted_ms = l.persisted_ms.max(l.high_ms);
-                l.last_flush_ms = now;
+        for (frame, pin_id, new_persisted) in &flushed {
+            if let Some(l) = self.pin_leases.get_mut(&(*frame, pin_id.clone())) {
+                l.high_ms = l.high_ms.max(*new_persisted);
+                l.persisted_ms = l.persisted_ms.max(*new_persisted);
+                l.last_flush_at = now_inst;
             }
         }
         Ok(flushed.len())

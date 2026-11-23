@@ -194,7 +194,7 @@ fn volatile_frames_can_never_become_timeline_heads() {
     let (mut e, _) = h.open(boot_a());
     let v = h.volatile(&mut e);
     assert!(matches!(
-        e.advance_timeline_cas("main", None, v, None),
+        e.advance_timeline_cas("main", "alice", None, v, None),
         Err(MetaError::VolatileInTimelineForbidden(f)) if f == v
     ));
     assert_eq!(e.timeline_head("main").unwrap(), None);
@@ -269,7 +269,8 @@ fn durable_child_of_volatile_parent_requires_full_mem_promotion() {
         .with_persisted(h.persisted(&vm));
     e.commit_frame(&Harness::commit_req(p.frame_id, "alice"), bundle, None)
         .unwrap();
-    e.advance_timeline_cas("main", None, p.frame_id, None).unwrap();
+    e.advance_timeline_cas("main", "alice", None, p.frame_id, None)
+        .unwrap();
 }
 
 #[test]
@@ -317,13 +318,13 @@ fn timeline_cas_moves_the_head_hold_atomically() {
         timeline_name: name.into(),
     };
 
-    e.advance_timeline_cas("main", None, a, None).unwrap();
+    e.advance_timeline_cas("main", "alice", None, a, None).unwrap();
     assert_eq!(e.holds(a).unwrap(), vec![head("main")]);
-    match e.advance_timeline_cas("main", None, b, None) {
+    match e.advance_timeline_cas("main", "alice", None, b, None) {
         Err(MetaError::TimelineCasMismatch { actual, .. }) => assert_eq!(actual, Some(a)),
         other => panic!("expected CAS mismatch, got {other:?}"),
     }
-    let adv = e.advance_timeline_cas("main", Some(a), b, None).unwrap();
+    let adv = e.advance_timeline_cas("main", "alice", Some(a), b, None).unwrap();
     assert_eq!(adv.previous, Some(a));
     assert!(e.holds(a).unwrap().is_empty());
     assert_eq!(e.holds(b).unwrap(), vec![head("main")]);
@@ -355,7 +356,7 @@ fn failed_cas_inside_commit_leaves_the_frame_preparing() {
     let h = Harness::new("commit-cas-fail");
     let (mut e, _) = h.open(boot_a());
     let a = h.durable(&mut e);
-    e.advance_timeline_cas("main", None, a, None).unwrap();
+    e.advance_timeline_cas("main", "alice", None, a, None).unwrap();
     let p = e
         .prepare_frame(
             &Harness::prepare_req("alice", FrameDurability::Durable, None, DISK_VM),
