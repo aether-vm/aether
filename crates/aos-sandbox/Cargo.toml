@@ -1,6 +1,6 @@
 [package]
 name = "aos-sandbox"
-description = "Phase 1: Namespace/Firecracker sandbox runtime. Placeholder."
+description = "Forkloom sandbox runtime drivers (Phase 1 NamespaceDriver cold fork + seccomp/userns/cgroup hardening)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,11 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+aos-guest = { path = "../aos-guest" }
+aos-types = { path = "../aos-types" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
