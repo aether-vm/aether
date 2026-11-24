@@ -1,6 +1,6 @@
 [package]
 name = "aos-gw"
-description = "Phase 1: zero-trust credential gateway. Placeholder."
+description = "Forkloom zero-trust egress gateway: epoch fence, L1 reverse proxy, L3 allowlist, streaming anti-reflection scanner, and encrypted hash-chained audit log."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,24 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+aho-corasick = "1.1"
+aos-types = { path = "../aos-types", features = ["serde"] }
+base64 = "0.22"
+blake3.workspace = true
+bytes = "1"
+chacha20poly1305 = "0.10"
+getrandom.workspace = true
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = "0.7"
+tracing.workspace = true
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
