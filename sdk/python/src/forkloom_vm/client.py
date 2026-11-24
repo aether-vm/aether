@@ -89,12 +89,24 @@ class ForkloomClient:
         self.default_timeout: float | None = timeout
         self._auto_negotiate: bool = auto_negotiate
         self._owns_channel: bool = channel is None
+
+        # When communicating over Unix Domain Sockets, HTTP/2 RFC 7540 strictly requires a valid
+        # :authority pseudo-header without slashes. grpcio otherwise derives an invalid authority
+        # from the socket path (e.g. `path%2Fto%2Fagentd.sock`), causing tonic/hyper to reject the
+        # stream with PROTOCOL_ERROR (RST_STREAM). We set default_authority to 'localhost' for UDS.
+        opts: dict[str, object] = {}
+        if self.target.startswith(("unix:", "unix://")):
+            opts["grpc.default_authority"] = "localhost"
+        if channel_options:
+            for k, v in channel_options:
+                opts[k] = v
+
         self._channel: grpc.Channel = (
             channel
             if channel is not None
             else grpc.insecure_channel(
                 self.target,
-                options=list(channel_options) if channel_options else None,
+                options=list(opts.items()) if opts else None,
             )
         )
         self._system = pb_grpc.SystemServiceStub(self._channel)

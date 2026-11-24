@@ -248,7 +248,12 @@ export class ForkloomClient {
 
     const pkg = loadForkloomPackage();
     const creds = grpc.credentials.createInsecure();
-    const channelOpts = options.channelOptions;
+    const channelOpts: grpc.ChannelOptions = {
+      ...(this.target.startsWith("unix:") || this.target.startsWith("unix://")
+        ? { "grpc.default_authority": "localhost" }
+        : {}),
+      ...options.channelOptions,
+    };
 
     this.systemClient = new pkg.forkloom.v1.SystemService(
       this.target,
