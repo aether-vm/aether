@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 aos-guest = { path = "../aos-guest" }
+aos-gw = { path = "../aos-gw" }
 aos-meta = { path = "../aos-meta" }
 aos-sandbox = { path = "../aos-sandbox" }
 aos-store = { path = "../aos-store" }

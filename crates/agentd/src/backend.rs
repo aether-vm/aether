@@ -966,7 +966,8 @@ impl TreeBackend for TreeStoreBackend {
 }
 
 /// Composite [`aos_meta::RecoveryHooks`] combining:
-/// * **R2**: Stale-epoch cgroup v2 `cgroup.kill` (`<cgroup_root>/epoch-<n>` for `n < current`) +
+/// * **R2**: Gateway epoch fence advancement ([`aos_gw::EpochFenceRegistry::advance_epoch`]),
+///   stale-epoch cgroup v2 `cgroup.kill` (`<cgroup_root>/epoch-<n>` for `n < current`), and
 ///   stale writable world subvolume reclamation under `pool_root/worlds/`;
 /// * **R3–R6**: Btrfs subvolume and volatile artifact cleanup via [`TreeStoreRecoveryHooks`].
 #[derive(Debug, Clone)]
@@ -974,6 +975,7 @@ pub struct ProductionRecoveryHooks {
     store: TreeStore,
     tree_hooks: TreeStoreRecoveryHooks,
     cgroup_root: PathBuf,
+    gateway_fence: Option<Arc<aos_gw::EpochFenceRegistry>>,
 }
 
 impl ProductionRecoveryHooks {
@@ -988,12 +990,27 @@ impl ProductionRecoveryHooks {
             store,
             tree_hooks,
             cgroup_root: cgroup_root.into(),
+            gateway_fence: None,
         }
+    }
+
+    /// Attach a shared [`aos_gw::EpochFenceRegistry`] so R2 recovery advances the gateway epoch
+    /// fence and immediately terminates all stale (`epoch < current`) bindings and streams.
+    #[must_use]
+    pub fn with_gateway_fence(mut self, fence: Arc<aos_gw::EpochFenceRegistry>) -> Self {
+        self.gateway_fence = Some(fence);
+        self
     }
 }
 
 impl RecoveryHooks for ProductionRecoveryHooks {
-    fn fence_gateway(&mut self, _epoch: EpochId) -> io::Result<()> {
+    fn fence_gateway(&mut self, epoch: EpochId) -> io::Result<()> {
+        if let Some(ref fence) = self.gateway_fence {
+            fence
+                .advance_epoch(epoch)
+                .map(|_| ())
+                .map_err(|e| io::Error::other(e.to_string()))?;
+        }
         Ok(())
     }
 

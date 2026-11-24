@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use aos_gw::{
+    AuditStore, BindingKey, CapabilityPolicy, EpochFenceRegistry, GwError, SlotBinding, SlotId,
+};
 use aos_meta::{
     CommitFrameRequest, CommitProofBundle, CreateWorldRequest as MetaCreateWorldRequest,
     DeleteOutcome, FencingToken as MetaFencingToken, FrameDurability as MetaDurability,
@@ -85,6 +88,13 @@ struct AgentdInner {
     /// World-lifetime Exec dedup cache keyed by `(world_id, owner, request_id)` (ARCHITECTURE_V2 §7.2).
     exec_cache: Mutex<HashMap<(WorldId, String, String), CachedExec>>,
     exec_seq: AtomicU64,
+    /// Shared `aos-gw` Epoch Fence Registry enforcing `(slot_id, world_id, daemon_epoch)` isolation.
+    gateway_fence: Arc<EpochFenceRegistry>,
+    /// Optional `aos-gw` encrypted audit log store for per-world `crypto_shred` on destroy.
+    audit_store: Option<Arc<AuditStore>>,
+    /// Active gateway slot binding per running world.
+    world_slots: Mutex<HashMap<WorldId, SlotId>>,
+    next_slot_id: AtomicU64,
 }
 
 /// Shared gRPC control-plane service implementing `SystemService`, `FrameService`, and `WorldService`.
@@ -110,6 +120,7 @@ impl AgentdService {
         sandbox: Arc<dyn SandboxBackend>,
         max_import_bytes: usize,
     ) -> Self {
+        let initial_epoch = meta.daemon_epoch();
         Self {
             inner: Arc::new(AgentdInner {
                 meta: Mutex::new(meta),
@@ -122,8 +133,76 @@ impl AgentdService {
                 world_idem_cache: Mutex::new(HashMap::new()),
                 exec_cache: Mutex::new(HashMap::new()),
                 exec_seq: AtomicU64::new(1),
+                gateway_fence: Arc::new(EpochFenceRegistry::new(initial_epoch)),
+                audit_store: None,
+                world_slots: Mutex::new(HashMap::new()),
+                next_slot_id: AtomicU64::new(1),
             }),
         }
+    }
+
+    /// Attach a shared [`aos_gw::EpochFenceRegistry`] and optional [`aos_gw::AuditStore`].
+    #[must_use]
+    pub fn with_gateway(
+        mut self,
+        fence: Arc<EpochFenceRegistry>,
+        audit_store: Option<Arc<AuditStore>>,
+    ) -> Self {
+        let current_epoch = self.inner.meta.lock().unwrap().daemon_epoch();
+        if fence.current_epoch() < current_epoch {
+            let _ = fence.advance_epoch(current_epoch);
+        }
+        let inner = Arc::get_mut(&mut self.inner)
+            .expect("AgentdService::with_gateway must be called before cloning the service");
+        inner.gateway_fence = fence;
+        inner.audit_store = audit_store;
+        self
+    }
+
+    /// Shared [`aos_gw::EpochFenceRegistry`] governing `(slot_id, world_id, daemon_epoch)` bindings.
+    #[must_use]
+    pub fn gateway_fence(&self) -> &Arc<EpochFenceRegistry> {
+        &self.inner.gateway_fence
+    }
+
+    /// Optional [`aos_gw::AuditStore`] for encrypted hash-chained gateway audit logs.
+    #[must_use]
+    pub fn audit_store(&self) -> Option<&Arc<AuditStore>> {
+        self.inner.audit_store.as_ref()
+    }
+
+    /// Look up the active [`aos_gw::SlotId`] bound to `world_id`, if any.
+    #[must_use]
+    pub fn world_gateway_slot(&self, world_id: WorldId) -> Option<SlotId> {
+        self.inner.world_slots.lock().unwrap().get(&world_id).cloned()
+    }
+
+    /// Bind (or replace) the [`aos_gw::CapabilityPolicy`] for `world_id` in the [`EpochFenceRegistry`]
+    /// under the current `daemon_epoch`.
+    pub fn bind_world_gateway_policy(
+        &self,
+        world_id: WorldId,
+        policy: CapabilityPolicy,
+    ) -> Result<Arc<SlotBinding>, Status> {
+        let epoch = self.inner.meta.lock().unwrap().daemon_epoch();
+        if let Some(old_slot) = self.inner.world_slots.lock().unwrap().remove(&world_id) {
+            self.inner.gateway_fence.revoke_slot(&old_slot);
+        }
+        let n = self.inner.next_slot_id.fetch_add(1, Ordering::Relaxed);
+        let slot_id = SlotId::new(format!("slot-{n}"))
+            .map_err(|e| Status::internal(format!("invalid slot id: {e}")))?;
+        let key = BindingKey::new(slot_id.clone(), world_id, epoch);
+        let binding = self
+            .inner
+            .gateway_fence
+            .register(key, policy)
+            .map_err(|e| Status::internal(format!("gateway fence register failed: {e}")))?;
+        self.inner
+            .world_slots
+            .lock()
+            .unwrap()
+            .insert(world_id, slot_id);
+        Ok(binding)
     }
 
     async fn lock_idem(&self, idem: Option<&MetaIdempotencyKey>) -> Option<OwnedMutexGuard<()>> {
@@ -1266,6 +1345,23 @@ impl WorldService for AgentdService {
             );
             return Err(e.into());
         }
+        if let Err(e) =
+            self.bind_world_gateway_policy(world_rec.world_id, CapabilityPolicy::deny_all())
+        {
+            let _ = self.inner.sandbox.destroy_world(world_rec.world_id);
+            let _ = self.inner.tree.destroy_subvolume(&rootfs_path);
+            let mut meta = self.inner.meta.lock().unwrap();
+            let _ = meta.destroy_world(
+                world_rec.world_id,
+                &req.owner,
+                world_rec.fencing_token,
+                None,
+            );
+            return Err(e);
+        }
+        if let Some(ref audit) = self.inner.audit_store {
+            let _ = audit.ensure_world(world_rec.world_id);
+        }
         self.inner.live_worlds.lock().unwrap().insert(
             world_rec.world_id,
             LiveWorldMeta {
@@ -1329,6 +1425,18 @@ impl WorldService for AgentdService {
         let _ = self.inner.sandbox.destroy_world(wid);
         if let Some(live) = self.inner.live_worlds.lock().unwrap().remove(&wid) {
             let _ = self.inner.tree.destroy_subvolume(&live.rootfs_path);
+        }
+        if let Some(slot_id) = self.inner.world_slots.lock().unwrap().remove(&wid) {
+            self.inner.gateway_fence.revoke_slot(&slot_id);
+        }
+        self.inner.gateway_fence.revoke_world(wid);
+        if let Some(ref audit) = self.inner.audit_store {
+            match audit.crypto_shred(wid) {
+                Ok(()) | Err(GwError::AuditKeyMissing { .. }) => {}
+                Err(e) => {
+                    tracing::warn!("audit crypto_shred for world {wid} returned error: {e}");
+                }
+            }
         }
         self.inner
             .exec_cache

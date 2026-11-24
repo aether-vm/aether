@@ -7,10 +7,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use aos_gw::{AuditStore, EpochFenceRegistry};
 use aos_meta::{FsArtifactBackend, MetaConfig, MetaEngine, RecoveryHooks, SystemClock};
 use aos_sandbox::{GuestAgentSource, DEFAULT_CGROUP_SLICE_ROOT};
 use aos_store::{TreeStore, TreeStoreConfig};
-use aos_types::BootId;
+use aos_types::{BootId, EpochId};
 use clap::{Parser, ValueEnum};
 
 use agentd::backend::{
@@ -88,6 +89,14 @@ async fn main() -> Result<()> {
     cfg.allow_same_fs_for_testing = cli.allow_same_fs;
 
     let boot_id = current_boot_id()?;
+    let gateway_fence = Arc::new(EpochFenceRegistry::new(EpochId::FIRST));
+    let audit_store = Arc::new(
+        AuditStore::open(
+            cli.meta_dir.join("audit"),
+            cli.meta_dir.join("audit-keys"),
+        )
+        .map_err(|e| anyhow!("AuditStore::open failed: {e}"))?,
+    );
 
     let (meta, summary, tree, sandbox): (
         MetaEngine,
@@ -100,6 +109,7 @@ async fn main() -> Result<()> {
             let (meta, summary) =
                 MetaEngine::open_and_recover(cfg, boot_id, hooks, Arc::new(SystemClock))
                     .map_err(|e| anyhow!("MetaEngine::open_and_recover failed: {e}"))?;
+            let _ = gateway_fence.advance_epoch(meta.daemon_epoch());
             let worlds_dir = cli.pool_dir.join("worlds");
             let tree: Arc<dyn TreeBackend> = Arc::new(LocalDevTreeBackend::new(worlds_dir));
             let sandbox: Arc<dyn SandboxBackend> = Arc::new(InMemorySandboxBackend::new());
@@ -111,11 +121,10 @@ async fn main() -> Result<()> {
             store_cfg.allow_non_btrfs_for_testing = cli.allow_non_btrfs;
             let store = TreeStore::open(store_cfg)
                 .map_err(|e| anyhow!("TreeStore::open failed: {e}"))?;
-            let hooks: Box<dyn RecoveryHooks> = Box::new(ProductionRecoveryHooks::new(
-                store.clone(),
-                &cli.tmpfs_dir,
-                &cli.cgroup_root,
-            ));
+            let hooks: Box<dyn RecoveryHooks> = Box::new(
+                ProductionRecoveryHooks::new(store.clone(), &cli.tmpfs_dir, &cli.cgroup_root)
+                    .with_gateway_fence(gateway_fence.clone()),
+            );
             let (meta, summary) =
                 MetaEngine::open_and_recover(cfg, boot_id, hooks, Arc::new(SystemClock))
                     .map_err(|e| anyhow!("MetaEngine::open_and_recover failed: {e}"))?;
@@ -155,7 +164,8 @@ async fn main() -> Result<()> {
         tree,
         sandbox,
         cli.max_import_mib.saturating_mul(1024 * 1024),
-    );
+    )
+    .with_gateway(gateway_fence, Some(audit_store));
 
     eprintln!(
         "agentd: listening on unix://{} (mode 0600, epoch {})",
