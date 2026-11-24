@@ -1,6 +1,6 @@
 [package]
 name = "aos-store"
-description = "Phase 1: TreeStore/BlockStore (Btrfs/XFS CoW storage pool). Placeholder."
+description = "Phase 1: Type-safe dual-storage engine (TreeStore on Btrfs + compile-time BlockStore separation)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,18 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+aos-meta = { path = "../aos-meta" }
+aos-types = { path = "../aos-types" }
+blake3.workspace = true
+serde.workspace = true
+tar = { version = "0.4", default-features = false }
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
