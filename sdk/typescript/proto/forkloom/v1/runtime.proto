@@ -1,0 +1,432 @@
+syntax = "proto3";
+
+package forkloom.v1;
+
+// ============================================================================
+// SystemService: protocol negotiation & daemon identity
+// ============================================================================
+
+// Protocol negotiation & health service (mandatory before issuing stateful RPCs
+// so satellite tools like forkloom-mcp can detect version skew cleanly).
+service SystemService {
+  rpc NegotiateVersion(NegotiateVersionRequest) returns (NegotiateVersionResponse);
+}
+
+message NegotiateVersionRequest {
+  string client_name = 1;
+  string client_version = 2;
+  uint32 supported_api_major = 3;
+}
+
+message NegotiateVersionResponse {
+  string daemon_version = 1;
+  uint32 api_major = 2;
+  uint32 api_minor = 3;
+  uint64 daemon_epoch = 4;
+  repeated string enabled_drivers = 5; // e.g., ["namespace", "firecracker"]
+}
+
+// ============================================================================
+// Common types, durability classes, fencing & structured error details
+// ============================================================================
+
+enum FrameDurability {
+  FRAME_DURABILITY_UNSPECIFIED = 0;
+  // Persisted to the storage pool with fsync barriers; survives host reboot.
+  FRAME_DURABILITY_DURABLE = 1;
+  // Memory image backed by quota-limited tmpfs; valid for one host boot only.
+  FRAME_DURABILITY_VOLATILE = 2;
+}
+
+enum FrameStateKind {
+  FRAME_STATE_UNSPECIFIED = 0;
+  FRAME_STATE_PREPARING = 1;
+  FRAME_STATE_COMMITTED = 2;
+  FRAME_STATE_DELETING = 3;
+}
+
+enum WorldStateKind {
+  WORLD_STATE_UNSPECIFIED = 0;
+  WORLD_STATE_RUNNING = 1;
+  WORLD_STATE_DESTROYED = 2;
+  WORLD_STATE_LOST = 3;
+}
+
+enum DriverKind {
+  DRIVER_KIND_UNSPECIFIED = 0;
+  DRIVER_KIND_NAMESPACE = 1;
+  DRIVER_KIND_FIRECRACKER = 2;
+}
+
+enum OutputStreamKind {
+  OUTPUT_STREAM_UNSPECIFIED = 0;
+  OUTPUT_STREAM_STDOUT = 1;
+  OUTPUT_STREAM_STDERR = 2;
+}
+
+// Machine-readable error discriminator attached in `x-forkloom-error-bin` gRPC
+// status metadata (ARCHITECTURE_V2 §7.2 & §7.3).
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  // World died across an agentd crash/restart (never auto-replayed).
+  ERROR_CODE_WORLD_LOST = 1;
+  // Side-effecting Exec outcome across a daemon restart is explicitly unknown.
+  ERROR_CODE_OUTCOME_UNKNOWN = 2;
+  // Caller presented a stale fencing token after ownership takeover.
+  ERROR_CODE_FENCED_OUT = 3;
+  ERROR_CODE_FRAME_NOT_FOUND = 4;
+  ERROR_CODE_WORLD_NOT_FOUND = 5;
+  ERROR_CODE_TIMELINE_NOT_FOUND = 6;
+  ERROR_CODE_TIMELINE_CAS_MISMATCH = 7;
+  ERROR_CODE_IDEMPOTENCY_CONFLICT = 8;
+  ERROR_CODE_OWNER_MISMATCH = 9;
+  ERROR_CODE_RESOURCE_EXHAUSTED = 10;
+  ERROR_CODE_UNSAFE_PATCH = 11;
+  ERROR_CODE_DISK_NOT_CLEAN = 12;
+  ERROR_CODE_INVALID_ARGUMENT = 13;
+  ERROR_CODE_DRIVER_UNAVAILABLE = 14;
+  ERROR_CODE_WORLD_NOT_RUNNING = 15;
+  ERROR_CODE_VOLATILE_IN_TIMELINE_FORBIDDEN = 16;
+  ERROR_CODE_PIN_NOT_FOUND = 17;
+  ERROR_CODE_FRAME_MARKED_FOR_DELETION = 18;
+  ERROR_CODE_PREPARED_FRAME_ABORTED = 19;
+  ERROR_CODE_INTERNAL = 20;
+}
+
+message ErrorDetail {
+  ErrorCode code = 1;
+  string message = 2;
+  string resource_id = 3;
+  uint64 current_fencing_token = 4;
+  uint64 presented_fencing_token = 5;
+  uint64 origin_epoch = 6;
+  uint64 lost_in_epoch = 7;
+}
+
+// Client-supplied idempotency key (ARCHITECTURE_V2 §7.2).
+message IdempotencyKey {
+  string owner = 1;
+  string request_id = 2;
+}
+
+// Monotonic per-world ownership fencing token (ARCHITECTURE_V2 §7.3).
+message FencingToken {
+  uint64 value = 1;
+}
+
+message PinSpec {
+  string pin_id = 1;
+  string owner = 2;
+  uint64 lease_ttl_ms = 3;
+}
+
+message HoldInfo {
+  string kind = 1;
+  string detail = 2;
+  uint64 expires_at_ms = 3;
+}
+
+message FrameInfo {
+  string frame_id = 1;
+  string owner = 2;
+  FrameDurability durability = 3;
+  FrameStateKind state = 4;
+  string parent_frame_id = 5;
+  map<string, string> labels = 6;
+  bool disk_clean = 7;
+  uint64 created_epoch = 8;
+  uint64 committed_at_ms = 9;
+  repeated string objects = 10;
+  repeated HoldInfo holds = 11;
+  bool marked_for_reclaim = 12;
+}
+
+message TimelineInfo {
+  string name = 1;
+  string owner = 2;
+  string head_frame_id = 3;
+}
+
+message WorldInfo {
+  string world_id = 1;
+  string owner = 2;
+  string base_frame_id = 3;
+  DriverKind driver = 4;
+  WorldStateKind state = 5;
+  map<string, string> labels = 6;
+  FencingToken fencing_token = 7;
+  uint64 origin_epoch = 8;
+  uint64 lost_in_epoch = 9;
+  uint64 ended_at_ms = 10;
+  string end_reason = 11;
+}
+
+message BoundedOutput {
+  bytes head = 1;
+  bytes tail = 2;
+  uint64 total_bytes = 3;
+  uint64 omitted_bytes = 4;
+  bool truncated = 5;
+}
+
+// ============================================================================
+// FrameService: immutable frames, timelines, pins, and zero-trust patch export
+// ============================================================================
+
+service FrameService {
+  // Stream a tar archive into a new immutable Base Frame (T1 Preparing -> unpack+fsync -> T2 Committed).
+  rpc ImportTar(stream ImportTarRequest) returns (ImportTarResponse);
+  rpc GetFrame(GetFrameRequest) returns (GetFrameResponse);
+  rpc ListFrames(ListFramesRequest) returns (ListFramesResponse);
+  rpc PinFrame(PinFrameRequest) returns (PinFrameResponse);
+  rpc RenewPin(RenewPinRequest) returns (RenewPinResponse);
+  rpc DeleteFrame(DeleteFrameRequest) returns (DeleteFrameResponse);
+  rpc AdvanceTimeline(AdvanceTimelineRequest) returns (AdvanceTimelineResponse);
+  rpc DeleteTimeline(DeleteTimelineRequest) returns (DeleteTimelineResponse);
+  // Export a validated patch bundle between two committed frames (PatchPathValidator + DiskClean).
+  rpc ExportPatch(ExportPatchRequest) returns (ExportPatchResponse);
+}
+
+message ImportTarHeader {
+  string owner = 1;
+  FrameDurability durability = 2;
+  string parent_frame_id = 3;
+  map<string, string> labels = 4;
+  PinSpec pin = 5;
+  string timeline_name = 6;
+  string expected_old_timeline_head = 7;
+  IdempotencyKey idempotency_key = 8;
+}
+
+message ImportTarRequest {
+  oneof chunk {
+    ImportTarHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message ImportTarResponse {
+  FrameInfo frame = 1;
+  TimelineInfo timeline = 2;
+  uint64 bytes_received = 3;
+}
+
+message GetFrameRequest {
+  string frame_id = 1;
+}
+
+message GetFrameResponse {
+  FrameInfo frame = 1;
+}
+
+message ListFramesRequest {
+  string owner = 1;
+  map<string, string> label_selector = 2;
+  bool include_non_committed = 3;
+}
+
+message ListFramesResponse {
+  repeated FrameInfo frames = 1;
+}
+
+message PinFrameRequest {
+  string frame_id = 1;
+  PinSpec pin = 2;
+}
+
+message PinFrameResponse {
+  HoldInfo hold = 1;
+}
+
+message RenewPinRequest {
+  string frame_id = 1;
+  string pin_id = 2;
+  string owner = 3;
+}
+
+message RenewPinResponse {
+  uint64 expires_at_ms = 1;
+  bool persisted_to_disk = 2;
+}
+
+message DeleteFrameRequest {
+  string frame_id = 1;
+  string owner = 2;
+  IdempotencyKey idempotency_key = 3;
+}
+
+message DeleteFrameResponse {
+  bool deleted = 1;
+  bool deferred = 2;
+  uint32 remaining_holds = 3;
+}
+
+message AdvanceTimelineRequest {
+  string timeline = 1;
+  string owner = 2;
+  string expected_old_frame_id = 3;
+  string new_head_frame_id = 4;
+  IdempotencyKey idempotency_key = 5;
+}
+
+message AdvanceTimelineResponse {
+  TimelineInfo timeline = 1;
+  string previous_head_frame_id = 2;
+}
+
+message DeleteTimelineRequest {
+  string timeline = 1;
+  string owner = 2;
+  IdempotencyKey idempotency_key = 3;
+}
+
+message DeleteTimelineResponse {
+  string released_head_frame_id = 1;
+}
+
+message ExportPatchRequest {
+  string target_frame_id = 1;
+  // Optional explicit base frame; defaults to target's lineage parent.
+  string base_frame_id = 2;
+  string owner = 3;
+}
+
+message PatchEntry {
+  string path = 1;
+  string kind = 2; // "add" | "modify" | "delete"
+  uint64 size_bytes = 3;
+}
+
+message ExportPatchResponse {
+  string base_frame_id = 1;
+  string target_frame_id = 2;
+  bytes unified_diff = 3;
+  repeated PatchEntry entries = 4;
+  string blake3_hex = 5;
+}
+
+// ============================================================================
+// WorldService: stateful sandbox worlds, fencing, exec streaming & checkpoints
+// ============================================================================
+
+service WorldService {
+  rpc CreateWorld(CreateWorldRequest) returns (CreateWorldResponse);
+  rpc GetWorld(GetWorldRequest) returns (GetWorldResponse);
+  rpc DestroyWorld(DestroyWorldRequest) returns (DestroyWorldResponse);
+  rpc AcquireFence(AcquireFenceRequest) returns (AcquireFenceResponse);
+  rpc RenewWorldLease(RenewWorldLeaseRequest) returns (RenewWorldLeaseResponse);
+  // Execute a command inside the World via aos-guest (streaming OutputChunk + terminal ExecResult).
+  rpc Exec(ExecRequest) returns (stream ExecEvent);
+  // Capture the World into a new immutable Frame (Preparing -> freeze+snapshot -> Committed).
+  rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse);
+}
+
+message CreateWorldRequest {
+  string owner = 1;
+  string base_frame_id = 2;
+  DriverKind driver = 3;
+  map<string, string> labels = 4;
+  uint64 lease_ttl_ms = 5;
+  IdempotencyKey idempotency_key = 6;
+}
+
+message CreateWorldResponse {
+  WorldInfo world = 1;
+}
+
+message GetWorldRequest {
+  string world_id = 1;
+}
+
+message GetWorldResponse {
+  WorldInfo world = 1;
+}
+
+message DestroyWorldRequest {
+  string world_id = 1;
+  string owner = 2;
+  FencingToken fencing_token = 3;
+  IdempotencyKey idempotency_key = 4;
+}
+
+message DestroyWorldResponse {
+  WorldInfo world = 1;
+}
+
+message AcquireFenceRequest {
+  string world_id = 1;
+  string owner = 2;
+}
+
+message AcquireFenceResponse {
+  FencingToken fencing_token = 1;
+}
+
+message RenewWorldLeaseRequest {
+  string world_id = 1;
+  string owner = 2;
+  FencingToken fencing_token = 3;
+}
+
+message RenewWorldLeaseResponse {
+  uint64 renewed_ttl_ms = 1;
+}
+
+message ExecRequest {
+  string world_id = 1;
+  string owner = 2;
+  FencingToken fencing_token = 3;
+  repeated string argv = 4;
+  map<string, string> env = 5;
+  string cwd = 6;
+  uint64 timeout_ms = 7;
+  uint32 max_output_bytes = 8;
+  bool stream = 9;
+  // World-lifetime dedup key; never auto-replayed across agentd restart (WorldLost/OutcomeUnknown).
+  IdempotencyKey idempotency_key = 10;
+}
+
+message ExecOutputChunk {
+  OutputStreamKind stream = 1;
+  uint64 seq = 2;
+  bytes data = 3;
+}
+
+message ExecResult {
+  string exec_id = 1;
+  bool has_exit_code = 2;
+  int32 exit_code = 3;
+  bool has_signal = 4;
+  int32 signal = 5;
+  bool timed_out = 6;
+  bool cgroup_killed = 7;
+  uint64 duration_ms = 8;
+  BoundedOutput stdout = 9;
+  BoundedOutput stderr = 10;
+  bool replayed_from_cache = 11;
+}
+
+message ExecEvent {
+  oneof event {
+    ExecOutputChunk chunk = 1;
+    ExecResult result = 2;
+  }
+}
+
+message CheckpointRequest {
+  string world_id = 1;
+  string owner = 2;
+  FencingToken fencing_token = 3;
+  FrameDurability durability = 4;
+  map<string, string> labels = 5;
+  PinSpec pin = 6;
+  string timeline_name = 7;
+  string expected_old_timeline_head = 8;
+  bool perform_syncfs = 9;
+  IdempotencyKey idempotency_key = 10;
+}
+
+message CheckpointResponse {
+  FrameInfo frame = 1;
+  TimelineInfo timeline = 2;
+}

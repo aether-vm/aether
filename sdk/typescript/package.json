@@ -9,10 +9,35 @@
     "directory": "sdk/typescript"
   },
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "proto",
+    "README.md"
+  ],
   "engines": {
     "node": ">=20.0.0"
   },
+  "scripts": {
+    "sync-proto": "node scripts/sync-proto.mjs",
+    "check-proto": "node scripts/sync-proto.mjs --check",
+    "build": "npm run sync-proto && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run sync-proto && tsc -p tsconfig.test.json && node --test dist/test-build/tests/*.test.js"
+  },
   "dependencies": {
-    "@grpc/grpc-js": "^1.12.0"
+    "@grpc/grpc-js": "^1.12.0",
+    "@grpc/proto-loader": "^0.7.15"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
   }
 }

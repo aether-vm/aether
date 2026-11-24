@@ -10,10 +10,23 @@ readme = "../README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
-    "grpcio>=1.68.0",
-    "protobuf>=5.28.0",
+    "grpcio>=1.85.3",
+    "protobuf>=7.35.1,<8.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "grpcio-tools>=1.85.3",
+    "pytest>=8.0.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/forkloom-vm"
 Repository = "https://github.com/forkloom-vm/forkloom"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/forkloom_vm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
