@@ -22,17 +22,24 @@
 
 ---
 
-## 二、《Forkloom 内核特战队》5 人角色编制与门禁
+## 二、《Forkloom 内核特战队》角色编制、模型分档与门禁
 
-> 当前为 **Antigravity Swarm 异构编队**：各成员为并行运行的独立智能体，经共享消息板协作，按文件归属互不越界（单文件单作者）。
+> 当前为 **Antigravity Swarm 异构分级编队**：各成员为并行运行的独立智能体，经共享消息板协作，按文件归属互不越界（单文件单作者），并按任务重要程度与推理复杂度实行严格的**模型分档与动态升降档机制**。
 
-| 代号 | 角色头衔 | 绑定模型（Swarm 成员 `model`） | 核心职责边界 |
-| :--- | :--- | :--- | :--- |
-| **`Arch-Zero`** | 总架构师 & 总控（Orchestrator / Coordinator） | Gemini 4 Neon High（Orchestrator Neon High，主会话） | 全局规划、跨模块拆解、`swarm` 编队调度与消息板仲裁、分歧收敛与交付汇报。 |
-| **`fsck`** | 红队首席评审官 | `claude-opus-5-5-high`（Opus 5.5 High） | **只审不写**。按四条铁律（先问崩溃语义、数字必带测量条件、追问不可替代性、按长尾脏负载评审）把守 **Gate 1（架构准入）** 与 **Gate 2（实测与核心代码合入）**，对 P0 硬伤拥有一票否决权（已完成 `aos-meta`/`aos-types` 与 `aos-guest`/`guest-image` Gate 2 代码审计 `PASS`）。 |
-| **`Forge`** | 内核主刀手 | `gemini-4-neon-high`（Gemini 4 Neon High） | 攻坚核心 Rust 内核（`aos-types`, `aos-store`, `aos-meta`, `aos-sandbox`, `aos-gw`, `aos-guest`）与 `guest-image/`。 |
-| **`Mach`** | 全栈与工程先锋 | `claude-sonnet-5-5-high`（Sonnet 5.5 High） | 负责 `proto/`、`aos-cli`、Python/TS 瘦 SDK、环境脚本、`benchmarks/` Phase 0 证伪压测（`phase0-harness`，含 F0-5 ~ F0-8 运行器）与集成测试，以及 `AGENTS.md` / `docs/HANDOFF.md` 同步。 |
-| **`Scout`** | 前沿情报雷达 | `gemini-4-hydrogen-high`（Gemini 4 Hydrogen High） | **只读**。配合 `WebSearch` / `XSearch` 核查竞品源码、内核邮件列表与 Firecracker 社区踩坑记录，输出带版本号的精确技术参考。 |
+| 代号 | 角色头衔 | 重要程度与分档 | 默认模型（首选 -> 配额回退） | 动态升降档规则与核心职责边界 |
+| :--- | :--- | :--- | :--- | :--- |
+| **`fsck`** | 红队首席评审官 | **P0 守门（`High`）** | 首选 `gemini-4-carbon-high` / `claude-opus-5-5-high`<br>回退 `gemini-4-argon-high` | **只审不写，P0 一票否决**。按四条铁律（先问崩溃语义、数字必带测量条件、追问不可替代性、按长尾脏负载评审）把守 Gate 1 / Gate 2 / 发布门禁；仅非核心文档或小改动复审可临时降 `medium`。 |
+| **`Forge`** | 内核主刀手 | **P0/P1 内核（默认 `Medium`，攻坚升 `High`）** | 默认 `gemini-4-neon-medium`<br>攻坚 `gemini-4-neon-high` | 负责核心 Rust 内核（`aos-types`, `aos-store`, `aos-meta`, `aos-sandbox`, `aos-guest`）与 `guest-image/`。日常实现与测试默认 `Medium`；仅攻坚 `unsafe` syscall、`seccomp-bpf`、KVM / Firecracker 热分叉或内核 Kconfig 时临时升 `gemini-4-neon-high`。 |
+| **`Arch-Zero`** (`coordinator`) | 总架构师 & 总控调度 | **P1 调度（`Medium`）** | `gemini-4-neon-medium`<br>（或 `gemini-4-argon-medium`） | **不直接改代码**。负责全局架构规划、跨模块契约拆解、`swarm` 编队生命周期与模型升降档调度、消息板仲裁与里程碑交付收敛。 |
+| **`Mach`** | 全栈与控制面工程先锋 | **P1 工程（`Medium`）** | 首选 `claude-sonnet-5-5-medium`<br>回退 `gemini-4-argon-medium` | 负责 `proto/`、`agentd`、`aos-cli`、`aos-gw` 集成维护、`benchmarks/`（`phase0-harness` 实测压测与报告归档）、Git 原子提交/推送，以及 `AGENTS.md` / `docs/HANDOFF.md` 同步。 |
+| **`SDK`** | 多语言瘦客户端工程师 | **P2 胶水/测试（`Flash Medium`）** | 首选 `gemini-3.8-flash-medium`<br>回退 `gemini-4-argon-medium` | 负责 `sdk/python`（`forkloom-vm`）、`sdk/typescript`（`@forkloom-vm/sdk`）薄 gRPC-over-UDS 客户端封装、Proto 代码生成与跨语言端到端集成测试。 |
+| **`Scout`** | 前沿情报雷达 | **P2 调研（`Flash Medium`）** | 默认 `gemini-3.8-flash-medium`<br>深研 `gemini-4-hydrogen-medium` | **只读**。核查内核 uapi ABI、竞品源码、内核邮件列表与 Firecracker 社区踩坑记录，输出带精确版本号与字节布局的技术参考；深度内核/社区源码调研可临时升 `gemini-4-hydrogen-medium`。 |
+| **`monitor`** | 消息板停滞监控 | **P3 巡检（`Flash Low`）** | `gemini-3.8-flash-low` | **只读定时巡检**。监控编队消息板是否出现全体停滞，按需精准唤醒下一责任人，零业务代码开销。 |
+
+**模型分档与编队精简纪律**：
+1. **严禁全员默认 `High`**：`High` 档位严格保留给红队 P0 终审门禁（`fsck`）及高危内核/安全边界攻坚（`Forge` 临时升档），常规工程、SDK 胶水与巡检一律采用 `Medium` / `Flash Medium` / `Flash Low`。
+2. **专项短期工位按需拉起、即审即退**：如 Phase 1 独立模块攻坚工位（`store`、`gw`、`meta-fixer` 等）按里程碑按需拉起，经 `fsck PASS` 并入主线后即刻 `kill` 退役，长期维护统一归口 `Forge` 与 `Mach`。
+3. **配额预警平滑切换**：触发配额预警时必须使用 `swarm model` 原地保留上下文切换至回退/降档模型，严禁使用 `kill + add` 丢弃会话历史，并在文档或汇报中如实记录。
 
 ---
 
