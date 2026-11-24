@@ -9,13 +9,26 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use aos_guest::OutputStream;
+use aos_meta::{ManagedObject, RecoveryHooks};
+use aos_sandbox::{
+    ExecRequest as SbxExecRequest, FreezeOptions, GuestAgentSource, NamespaceDriver, NetnsMode,
+    SandboxDriver, SandboxError, SeccompPolicy, SpawnWorldSpec as DriverSpawnSpec, WorldHandle,
+    DEFAULT_CGROUP_SLICE_ROOT, DEFAULT_HANDSHAKE_TIMEOUT,
+};
+use aos_store::{
+    ExportPatchOptions, PatchFileChange, StoreError, TarImportOptions, TreeStore,
+    TreeStoreRecoveryHooks,
+};
 use aos_types::patch_path::{BaseKind, BaseTree, PatchEntry, PatchPathValidator, PatchSet};
-use aos_types::{PersistProof, Untrusted, WorldId};
+use aos_types::{EpochId, PersistProof, Untrusted, WorldId};
 use tokio::sync::mpsc;
 
 use crate::error::BackendError;
@@ -722,6 +735,521 @@ impl SandboxBackend for InMemorySandboxBackend {
 
     fn destroy_world(&self, world_id: WorldId) -> Result<(), BackendError> {
         self.worlds.lock().unwrap().remove(&world_id);
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Production Phase 1 Backends: TreeStoreBackend + ProductionRecoveryHooks + NamespaceSandboxBackend
+// ============================================================================
+
+/// Convert an [`aos_store::StoreError`] into a control-plane [`BackendError`].
+#[must_use]
+pub fn map_store_error(err: StoreError) -> BackendError {
+    match err {
+        StoreError::UnsafeTarEntry { .. }
+        | StoreError::PatchValidation(_)
+        | StoreError::OutsidePool { .. } => BackendError::UnsafePatch(err.to_string()),
+        StoreError::NoSpace { .. } => BackendError::ResourceExhausted(err.to_string()),
+        StoreError::InvalidName { .. } | StoreError::NotReadOnly { .. } => {
+            BackendError::InvalidArgument(err.to_string())
+        }
+        StoreError::ForbiddenPoolRoot { .. }
+        | StoreError::NotBtrfs { .. }
+        | StoreError::QgroupsEnabled { .. }
+        | StoreError::QgroupsCheckFailed { .. }
+        | StoreError::AutodefragEnabled { .. }
+        | StoreError::MountInfoCheckFailed { .. }
+        | StoreError::AlreadyExists { .. }
+        | StoreError::NotFound { .. }
+        | StoreError::DiffError { .. }
+        | StoreError::Io { .. } => BackendError::Internal(err.to_string()),
+    }
+}
+
+/// Convert an [`aos_sandbox::SandboxError`] into a control-plane [`BackendError`].
+#[must_use]
+pub fn map_sandbox_error(err: SandboxError) -> BackendError {
+    match err {
+        SandboxError::UnsupportedPlatform(msg) => BackendError::DriverUnavailable(msg.to_owned()),
+        SandboxError::InvalidConfig(msg) => BackendError::InvalidArgument(msg),
+        SandboxError::WorldDestroyed => BackendError::Internal("world already destroyed".into()),
+        SandboxError::SpawnFailed { .. }
+        | SandboxError::Cgroup { .. }
+        | SandboxError::HandshakeFailed(_)
+        | SandboxError::ProtocolViolation(_)
+        | SandboxError::GuestError { .. }
+        | SandboxError::Codec(_)
+        | SandboxError::Io(_) => BackendError::Internal(err.to_string()),
+    }
+}
+
+/// Production [`TreeBackend`] wrapping [`aos_store::TreeStore`] (Btrfs subvolumes, `openat2`
+/// confined tar unpack, O(1) writable snapshots, read-only checkpoints, and zero-trust
+/// `export_patch`).
+#[derive(Debug, Clone)]
+pub struct TreeStoreBackend {
+    store: TreeStore,
+    tar_opts: TarImportOptions,
+    patch_opts: ExportPatchOptions,
+}
+
+impl TreeStoreBackend {
+    /// Construct a production tree backend around an open [`TreeStore`].
+    pub fn new(store: TreeStore) -> Self {
+        Self {
+            store,
+            tar_opts: TarImportOptions::default(),
+            patch_opts: ExportPatchOptions::default(),
+        }
+    }
+
+    /// Construct with custom tar import and patch export options.
+    pub fn with_options(
+        store: TreeStore,
+        tar_opts: TarImportOptions,
+        patch_opts: ExportPatchOptions,
+    ) -> Self {
+        Self {
+            store,
+            tar_opts,
+            patch_opts,
+        }
+    }
+
+    /// Underlying [`TreeStore`].
+    #[must_use]
+    pub fn store(&self) -> &TreeStore {
+        &self.store
+    }
+}
+
+impl TreeBackend for TreeStoreBackend {
+    fn import_tar(&self, target_path: &Path, tar_bytes: &[u8]) -> Result<PersistProof, BackendError> {
+        if tar_bytes.is_empty() {
+            return Err(BackendError::InvalidArgument("empty tar stream".into()));
+        }
+        let target_name = target_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| {
+                BackendError::InvalidArgument(format!(
+                    "invalid subvolume target path {}",
+                    target_path.display()
+                ))
+            })?;
+        let persisted = self
+            .store
+            .import_tar_named(target_name, io::Cursor::new(tar_bytes), &self.tar_opts)
+            .map_err(map_store_error)?;
+        Ok(persisted.into_parts().1)
+    }
+
+    fn create_writable_clone(
+        &self,
+        base_path: &Path,
+        world_id: WorldId,
+    ) -> Result<PathBuf, BackendError> {
+        let base = self.store.open_subvolume(base_path).map_err(map_store_error)?;
+        let target_name = format!("w-{world_id}");
+        let clone = self
+            .store
+            .create_writable_clone(&base, &target_name)
+            .map_err(map_store_error)?;
+        Ok(clone.path().to_path_buf())
+    }
+
+    fn snapshot_readonly(
+        &self,
+        live_path: &Path,
+        target_path: &Path,
+    ) -> Result<PersistProof, BackendError> {
+        let live = self.store.open_subvolume(live_path).map_err(map_store_error)?;
+        let target_name = target_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| {
+                BackendError::InvalidArgument(format!(
+                    "invalid snapshot target path {}",
+                    target_path.display()
+                ))
+            })?;
+        let persisted = self
+            .store
+            .snapshot_readonly(&live, target_name)
+            .map_err(map_store_error)?;
+        Ok(persisted.into_parts().1)
+    }
+
+    fn destroy_subvolume(&self, path: &Path) -> Result<(), BackendError> {
+        self.store.destroy_subvolume(path).map_err(map_store_error)
+    }
+
+    fn export_patch(
+        &self,
+        base_path: &Path,
+        target_path: &Path,
+    ) -> Result<ValidatedPatchBundle, BackendError> {
+        let base = self.store.open_subvolume(base_path).map_err(map_store_error)?;
+        let target = self
+            .store
+            .open_subvolume(target_path)
+            .map_err(map_store_error)?;
+        let bundle = self
+            .store
+            .export_patch(&base, &target, &self.patch_opts)
+            .map_err(map_store_error)?;
+
+        let mut entries = Vec::with_capacity(bundle.len());
+        let mut diff = String::new();
+        for change in bundle.changes() {
+            match change {
+                PatchFileChange::PutFile {
+                    path,
+                    contents,
+                    modified,
+                    ..
+                } => {
+                    let kind = if *modified { "modify" } else { "add" };
+                    entries.push(ValidatedPatchEntry {
+                        path: path.clone(),
+                        kind,
+                        size_bytes: contents.len() as u64,
+                    });
+                    if *modified {
+                        diff.push_str(&format!("--- a/{path}\n+++ b/{path}\n"));
+                    } else {
+                        diff.push_str(&format!("--- /dev/null\n+++ b/{path}\n"));
+                    }
+                    for line in String::from_utf8_lossy(contents).lines() {
+                        diff.push('+');
+                        diff.push_str(line);
+                        diff.push('\n');
+                    }
+                }
+                PatchFileChange::PutSymlink {
+                    path,
+                    target,
+                    modified,
+                } => {
+                    let kind = if *modified { "modify" } else { "add" };
+                    entries.push(ValidatedPatchEntry {
+                        path: path.clone(),
+                        kind,
+                        size_bytes: target.len() as u64,
+                    });
+                    if *modified {
+                        diff.push_str(&format!("--- a/{path}\n+++ b/{path}\n+{target}\n"));
+                    } else {
+                        diff.push_str(&format!("--- /dev/null\n+++ b/{path}\n+{target}\n"));
+                    }
+                }
+                PatchFileChange::Remove { path } => {
+                    entries.push(ValidatedPatchEntry {
+                        path: path.clone(),
+                        kind: "delete",
+                        size_bytes: 0,
+                    });
+                    diff.push_str(&format!("--- a/{path}\n+++ /dev/null\n"));
+                }
+            }
+        }
+
+        let unified_diff = diff.into_bytes();
+        let blake3_hex = blake3::hash(&unified_diff).to_hex().to_string();
+        Ok(ValidatedPatchBundle {
+            unified_diff,
+            entries,
+            blake3_hex,
+        })
+    }
+}
+
+/// Composite [`aos_meta::RecoveryHooks`] combining:
+/// * **R2**: Stale-epoch cgroup v2 `cgroup.kill` (`<cgroup_root>/epoch-<n>` for `n < current`) +
+///   stale writable world subvolume reclamation under `pool_root/worlds/`;
+/// * **R3–R6**: Btrfs subvolume and volatile artifact cleanup via [`TreeStoreRecoveryHooks`].
+#[derive(Debug, Clone)]
+pub struct ProductionRecoveryHooks {
+    store: TreeStore,
+    tree_hooks: TreeStoreRecoveryHooks,
+    cgroup_root: PathBuf,
+}
+
+impl ProductionRecoveryHooks {
+    /// Construct production recovery hooks for `store`, `volatile_root`, and `cgroup_root`.
+    pub fn new(
+        store: TreeStore,
+        volatile_root: impl Into<PathBuf>,
+        cgroup_root: impl Into<PathBuf>,
+    ) -> Self {
+        let tree_hooks = TreeStoreRecoveryHooks::new(store.clone(), volatile_root);
+        Self {
+            store,
+            tree_hooks,
+            cgroup_root: cgroup_root.into(),
+        }
+    }
+}
+
+impl RecoveryHooks for ProductionRecoveryHooks {
+    fn fence_gateway(&mut self, _epoch: EpochId) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn kill_stale_epochs(&mut self, current: EpochId) -> io::Result<()> {
+        // 1. R2: Terminate and remove any `<cgroup_root>/epoch-<n>` cgroups where `n < current`.
+        if self.cgroup_root.exists()
+            && let Ok(entries) = fs::read_dir(&self.cgroup_root)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let Some(num_str) = name.strip_prefix("epoch-") else {
+                    continue;
+                };
+                let Ok(epoch_num) = num_str.parse::<u64>() else {
+                    continue;
+                };
+                if epoch_num < current.get() {
+                    kill_and_remove_epoch_cgroup_tree(&path);
+                }
+            }
+        }
+
+        // 2. Reclaim any leftover writable world subvolumes from prior epochs under `pool/worlds/`.
+        let worlds_dir = self.store.worlds_dir();
+        if worlds_dir.exists()
+            && let Ok(entries) = fs::read_dir(&worlds_dir)
+        {
+            for entry in entries.flatten() {
+                let _ = self.store.destroy_subvolume(&entry.path());
+            }
+        }
+        Ok(())
+    }
+
+    fn destroy_pool_object(&mut self, path: &Path, object: &ManagedObject) -> io::Result<()> {
+        self.tree_hooks.destroy_pool_object(path, object)
+    }
+
+    fn destroy_volatile_object(&mut self, object: &ManagedObject) -> io::Result<()> {
+        self.tree_hooks.destroy_volatile_object(object)
+    }
+
+    fn purge_quarantined(&mut self, path: &Path) -> io::Result<()> {
+        self.tree_hooks.purge_quarantined(path)
+    }
+}
+
+fn kill_and_remove_epoch_cgroup_tree(epoch_dir: &Path) {
+    let _ = fs::write(epoch_dir.join("cgroup.kill"), b"1\n");
+    let _ = fs::write(epoch_dir.join("cgroup.freeze"), b"0\n");
+    if let Ok(children) = fs::read_dir(epoch_dir) {
+        for child in children.flatten() {
+            let child_path = child.path();
+            if child_path.is_dir() {
+                let _ = fs::write(child_path.join("cgroup.kill"), b"1\n");
+                let _ = fs::write(child_path.join("cgroup.freeze"), b"0\n");
+                let _ = fs::write(child_path.join("cgroup.kill"), b"1\n");
+                for _ in 0..50 {
+                    let empty = fs::read_to_string(child_path.join("cgroup.procs"))
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true);
+                    if empty && fs::remove_dir(&child_path).is_ok() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let _ = fs::remove_dir(&child_path);
+            }
+        }
+    }
+    let _ = fs::remove_dir(epoch_dir);
+}
+
+/// Configuration for [`NamespaceSandboxBackend`].
+#[derive(Debug, Clone)]
+pub struct NamespaceSandboxConfig {
+    /// Current `agentd` daemon epoch.
+    pub epoch: EpochId,
+    /// How `aos-guest` is located inside spawned worlds.
+    pub guest_agent: GuestAgentSource,
+    /// Host cgroup v2 slice root (`/sys/fs/cgroup/forkloom.slice`).
+    pub cgroup_root: PathBuf,
+    /// Enable `clone3(CLONE_INTO_CGROUP)` + `cgroup.kill`.
+    pub enable_cgroup: bool,
+    /// Enable `CLONE_NEWUSER`.
+    pub enable_userns: bool,
+    /// Network namespace mode.
+    pub netns_mode: NetnsMode,
+    /// Seccomp-BPF policy.
+    pub seccomp_policy: SeccompPolicy,
+    /// Initial `Ping -> Pong` handshake timeout.
+    pub handshake_timeout: Duration,
+}
+
+impl NamespaceSandboxConfig {
+    /// Production defaults for `epoch` with `aos-guest` at `/sbin/init` inside rootfs.
+    pub fn new(epoch: EpochId) -> Self {
+        Self {
+            epoch,
+            guest_agent: GuestAgentSource::InRootfs(PathBuf::from("/sbin/init")),
+            cgroup_root: PathBuf::from(DEFAULT_CGROUP_SLICE_ROOT),
+            enable_cgroup: true,
+            enable_userns: true,
+            netns_mode: NetnsMode::IsolatedLoopback,
+            seccomp_policy: SeccompPolicy::StrictBaseline,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+        }
+    }
+}
+
+/// Production [`SandboxBackend`] wrapping [`aos_sandbox::NamespaceDriver`].
+pub struct NamespaceSandboxBackend {
+    driver: NamespaceDriver,
+    cfg: NamespaceSandboxConfig,
+    worlds: Mutex<HashMap<WorldId, Arc<Mutex<WorldHandle>>>>,
+}
+
+impl NamespaceSandboxBackend {
+    /// Construct a production namespace sandbox backend.
+    pub fn new(cfg: NamespaceSandboxConfig) -> Self {
+        Self {
+            driver: NamespaceDriver::new(),
+            cfg,
+            worlds: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn get_world(&self, world_id: WorldId) -> Result<Arc<Mutex<WorldHandle>>, BackendError> {
+        self.worlds
+            .lock()
+            .unwrap()
+            .get(&world_id)
+            .cloned()
+            .ok_or(BackendError::WorldNotRunning(world_id))
+    }
+}
+
+impl SandboxBackend for NamespaceSandboxBackend {
+    fn enabled_drivers(&self) -> Vec<String> {
+        vec![self.driver.driver_name().to_owned()]
+    }
+
+    fn spawn_world(&self, spec: SpawnWorldSpec) -> Result<(), BackendError> {
+        if spec.driver != DriverKind::Namespace && spec.driver != DriverKind::Unspecified {
+            return Err(BackendError::DriverUnavailable(format!(
+                "driver {:?} is not supported by NamespaceSandboxBackend",
+                spec.driver
+            )));
+        }
+
+        let mut drv_spec = DriverSpawnSpec::new(
+            spec.world_id,
+            self.cfg.epoch,
+            &spec.rootfs_path,
+            self.cfg.guest_agent.clone(),
+        );
+        drv_spec.cgroup_root = self.cfg.cgroup_root.clone();
+        drv_spec.enable_cgroup = self.cfg.enable_cgroup;
+        drv_spec.enable_userns = self.cfg.enable_userns;
+        drv_spec.netns_mode = self.cfg.netns_mode;
+        drv_spec.seccomp_policy = self.cfg.seccomp_policy;
+        drv_spec.handshake_timeout = self.cfg.handshake_timeout;
+
+        let handle = self
+            .driver
+            .spawn_world(drv_spec)
+            .map_err(map_sandbox_error)?;
+        self.worlds
+            .lock()
+            .unwrap()
+            .insert(spec.world_id, Arc::new(Mutex::new(handle)));
+        Ok(())
+    }
+
+    fn exec(
+        &self,
+        world_id: WorldId,
+        req: SandboxExecRequest,
+        chunk_tx: mpsc::Sender<SandboxOutputChunk>,
+    ) -> Result<SandboxExecResult, BackendError> {
+        let world_arc = self.get_world(world_id)?;
+        let mut handle = world_arc.lock().unwrap();
+
+        let mut sbx_req = SbxExecRequest::new(req.exec_id.clone(), req.argv);
+        sbx_req.env = req.env;
+        sbx_req.cwd = req.cwd;
+        sbx_req.timeout = Some(Duration::from_millis(req.timeout_ms));
+        sbx_req.max_output_bytes = Some(req.max_output_bytes);
+        sbx_req.stream = req.stream;
+
+        let reply = if req.stream {
+            handle
+                .exec_streaming(sbx_req, |chunk| {
+                    let stream = match chunk.stream {
+                        OutputStream::Stdout => OutputStreamKind::OutputStreamStdout,
+                        OutputStream::Stderr => OutputStreamKind::OutputStreamStderr,
+                    };
+                    let _ = chunk_tx.try_send(SandboxOutputChunk {
+                        stream,
+                        seq: chunk.seq,
+                        data: chunk.data,
+                    });
+                })
+                .map_err(map_sandbox_error)?
+        } else {
+            handle.exec(sbx_req).map_err(map_sandbox_error)?
+        };
+
+        let map_bounded = |b: aos_guest::BoundedOutput| BoundedOutput {
+            head: b.head.0,
+            tail: b.tail.0,
+            total_bytes: b.total_bytes,
+            omitted_bytes: b.omitted_bytes,
+            truncated: b.truncated,
+        };
+
+        Ok(SandboxExecResult {
+            exec_id: reply.exec_id,
+            exit_code: reply.exit_code,
+            signal: reply.signal,
+            timed_out: reply.timed_out,
+            cgroup_killed: reply.cgroup_killed,
+            duration_ms: reply.duration_ms,
+            stdout: map_bounded(reply.stdout),
+            stderr: map_bounded(reply.stderr),
+        })
+    }
+
+    fn freeze_and_sync(&self, world_id: WorldId, perform_syncfs: bool) -> Result<bool, BackendError> {
+        let world_arc = self.get_world(world_id)?;
+        let mut handle = world_arc.lock().unwrap();
+        let opts = if perform_syncfs {
+            FreezeOptions::disk_clean()
+        } else {
+            FreezeOptions::default()
+        };
+        let reply = handle.freeze_and_sync(opts).map_err(map_sandbox_error)?;
+        Ok(reply.disk_clean)
+    }
+
+    fn unfreeze(&self, world_id: WorldId) -> Result<(), BackendError> {
+        let world_arc = self.get_world(world_id)?;
+        let mut handle = world_arc.lock().unwrap();
+        handle
+            .unfreeze(Duration::from_secs(5))
+            .map_err(map_sandbox_error)
+    }
+
+    fn destroy_world(&self, world_id: WorldId) -> Result<(), BackendError> {
+        if let Some(world_arc) = self.worlds.lock().unwrap().remove(&world_id) {
+            let mut handle = world_arc.lock().unwrap();
+            handle.destroy().map_err(map_sandbox_error)?;
+        }
         Ok(())
     }
 }

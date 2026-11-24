@@ -857,6 +857,128 @@ async fn idempotency_conflict_and_rollback_safety_across_import_checkpoint_world
     );
 }
 
+#[tokio::test]
+async fn tree_store_backend_and_production_recovery_hooks_roundtrip() {
+    use agentd::backend::{ProductionRecoveryHooks, TreeStoreBackend};
+    use aos_store::{TreeStore, TreeStoreConfig};
+
+    let env = TestEnv::new("treestore-prod-hooks");
+    let store = TreeStore::open(TreeStoreConfig::for_testing(&env.cfg.pool_root)).unwrap();
+    let hooks = Box::new(ProductionRecoveryHooks::new(
+        store.clone(),
+        &env.tmpfs,
+        env.root.join("cgroups"),
+    ));
+    let boot = BootId::parse(TEST_BOOT).unwrap();
+    let (engine, _) = MetaEngine::open_and_recover(
+        env.cfg.clone(),
+        boot,
+        hooks,
+        env.clock.clone(),
+    )
+    .unwrap();
+    let tree = Arc::new(TreeStoreBackend::new(store));
+    let sandbox = Arc::new(InMemorySandboxBackend::new());
+    let svc = AgentdService::new(engine, tree, sandbox);
+
+    let tar = build_ustar_archive(&[("hello.txt", b"v1\n")]);
+    let imp = import_tar_over_duplex(
+        &svc,
+        ImportTarHeader {
+            owner: "prod".into(),
+            durability: FrameDurability::Durable as i32,
+            parent_frame_id: String::new(),
+            labels: HashMap::new(),
+            pin: None,
+            timeline_name: "main".into(),
+            expected_old_timeline_head: String::new(),
+            idempotency_key: None,
+        },
+        tar,
+    )
+    .await
+    .unwrap();
+    let base_fid = imp.frame.unwrap().frame_id;
+
+    let w = svc
+        .create_world(Request::new(CreateWorldRequest {
+            owner: "prod".into(),
+            base_frame_id: base_fid.clone(),
+            driver: DriverKind::Namespace as i32,
+            labels: HashMap::new(),
+            lease_ttl_ms: 60_000,
+            idempotency_key: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .world
+        .unwrap();
+    let wid = w.world_id;
+    let fence = w.fencing_token.unwrap().value;
+
+    let mut s = svc
+        .exec(Request::new(ExecRequest {
+            world_id: wid.clone(),
+            owner: "prod".into(),
+            fencing_token: Some(FencingToken { value: fence }),
+            argv: vec!["write-file".into(), "hello.txt".into(), "v2".into()],
+            env: HashMap::new(),
+            cwd: String::new(),
+            timeout_ms: 5_000,
+            max_output_bytes: 4096,
+            stream: false,
+            idempotency_key: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    while s.next().await.is_some() {}
+
+    let cp = svc
+        .checkpoint(Request::new(CheckpointRequest {
+            world_id: wid.clone(),
+            owner: "prod".into(),
+            fencing_token: Some(FencingToken { value: fence }),
+            durability: FrameDurability::Durable as i32,
+            labels: HashMap::new(),
+            pin: None,
+            timeline_name: "main".into(),
+            expected_old_timeline_head: base_fid.clone(),
+            perform_syncfs: true,
+            idempotency_key: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .frame
+        .unwrap();
+
+    let patch = svc
+        .export_patch(Request::new(ExportPatchRequest {
+            target_frame_id: cp.frame_id,
+            base_frame_id: base_fid,
+            owner: "prod".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(patch.entries.len(), 1);
+    assert_eq!(patch.entries[0].path, "hello.txt");
+    assert_eq!(patch.entries[0].kind, "modify");
+    let diff_str = String::from_utf8(patch.unified_diff).unwrap();
+    assert!(diff_str.contains("+v2"));
+
+    svc.destroy_world(Request::new(DestroyWorldRequest {
+        world_id: wid,
+        owner: "prod".into(),
+        fencing_token: Some(FencingToken { value: fence }),
+        idempotency_key: None,
+    }))
+    .await
+    .unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn uds_transport_enforces_0600_perms_and_serves_grpc_end_to_end() {
