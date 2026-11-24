@@ -1,6 +1,6 @@
 [package]
 name = "agentd"
-description = "agentd: Forkloom runtime daemon. Placeholder."
+description = "agentd: Forkloom single-host control-plane daemon (gRPC over 0600 UDS, wired to aos-meta)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,8 +8,33 @@ rust-version.workspace = true
 repository.workspace = true
 publish = false
 
+[lib]
+name = "agentd"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agentd"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
+aos-meta = { path = "../aos-meta" }
+aos-types = { path = "../aos-types", features = ["serde"] }
+blake3.workspace = true
+clap = { workspace = true, features = ["env"] }
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-build = "0.12"
+
+[dev-dependencies]
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.4"
