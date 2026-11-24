@@ -338,6 +338,19 @@ fn live_linux_namespace_driver_hardening_and_cgroup_kill() {
         "expected aos-guest + double-forked daemon in world cgroup, got {before_pids:?}"
     );
 
+    // Unfreeze before freeze MUST be rejected with InvalidStateTransition.
+    let pre_unfreeze_err = world.unfreeze(Duration::from_secs(5)).unwrap_err();
+    assert!(
+        matches!(
+            pre_unfreeze_err,
+            SandboxError::GuestError {
+                code: ErrorCode::InvalidStateTransition,
+                ..
+            }
+        ),
+        "expected InvalidStateTransition when unfreezing non-frozen world, got {pre_unfreeze_err:?}"
+    );
+
     // FreezeAndSync on live NamespaceDriver world (host freezes w-<id> + syncfs rootfs).
     let freeze = world
         .freeze_and_sync(FreezeOptions::disk_clean())
@@ -365,6 +378,39 @@ fn live_linux_namespace_driver_hardening_and_cgroup_kill() {
         ),
         "expected AgentFrozen while frozen, got {frozen_err:?}"
     );
+
+    // Unfreeze (agentd Checkpoint resume path): verify frozen 0 -> Ping Ready -> Exec succeeds!
+    world
+        .unfreeze(Duration::from_secs(5))
+        .expect("live NamespaceDriver unfreeze must succeed");
+
+    let cg_events_unfrozen =
+        fs::read_to_string(world_cg.join("cgroup.events")).expect("read cgroup.events after unfreeze");
+    assert!(
+        cg_events_unfrozen.lines().any(|l| l.trim() == "frozen 0"),
+        "w-<id>/cgroup.events must report 'frozen 0' after unfreeze, got:\n{cg_events_unfrozen}"
+    );
+
+    let post_unfreeze_pong = world.ping(9999).expect("Ping after unfreeze");
+    assert_eq!(post_unfreeze_pong.state, AgentState::Ready);
+
+    let post_unfreeze_exec = world
+        .exec(ExecRequest::new(
+            "after-unfreeze",
+            vec!["/bin/sh".into(), "-c".into(), "echo AFTER_UNFREEZE_OK".into()],
+        ))
+        .expect("Exec after unfreeze must succeed");
+    assert_eq!(post_unfreeze_exec.exit_code, Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(post_unfreeze_exec.stdout.head.as_slice()).trim(),
+        "AFTER_UNFREEZE_OK"
+    );
+
+    // Re-freeze and verify destroy() cleanly kills & removes a frozen world with lingering daemon!
+    let freeze2 = world
+        .freeze_and_sync(FreezeOptions::disk_clean())
+        .expect("second freeze_and_sync must succeed");
+    assert!(freeze2.disk_clean);
 
     // Destroy MUST cleanly kill & remove the frozen world cgroup with 0 surviving PIDs!
     world.destroy().expect("world.destroy must succeed on frozen world");

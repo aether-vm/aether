@@ -28,8 +28,9 @@ use aos_sandbox::seccomp::{
 };
 use aos_sandbox::{
     AUDIT_ARCH_X86_64, BLOCKED_EPERM_SYSCALLS, CLONE_NEWUSER, ENOSYS, EOPNOTSUPP, EPERM,
-    ExecRequest, FreezeOptions, GuestAgentSource, GuestRpcClient, IdMapRange, RpcWorldBackend,
-    SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS, SandboxError, SeccompData, SpawnWorldSpec,
+    ExecOutputChunk, ExecReply, ExecRequest, FreezeOptions, FreezeReply, GuestAgentSource,
+    GuestRpcClient, IdMapRange, PingReply, RpcWorldBackend, SECCOMP_RET_ALLOW,
+    SECCOMP_RET_KILL_PROCESS, SandboxError, SeccompData, SpawnWorldSpec, WorldBackend,
     WorldHandle, WorldInfo, build_x86_64_baseline_filter, eval_filter, ret_errno,
 };
 #[cfg(not(target_os = "linux"))]
@@ -450,8 +451,168 @@ fn world_handle_roundtrips_ping_streaming_exec_freeze_and_idempotent_destroy() {
     handle.destroy().unwrap();
     assert_eq!(destroy_count.load(Ordering::SeqCst), 1);
     assert!(matches!(handle.ping(1), Err(SandboxError::WorldDestroyed)));
+    assert!(matches!(
+        handle.unfreeze(Duration::from_secs(1)),
+        Err(SandboxError::WorldDestroyed)
+    ));
 
     drop(handle);
     assert_eq!(destroy_count.load(Ordering::SeqCst), 1);
     server_thread.join().unwrap();
+}
+
+struct StatefulFreezeMockBackend {
+    info: WorldInfo,
+    frozen: bool,
+    disk_clean: bool,
+    unfreeze_calls: usize,
+}
+
+impl WorldBackend for StatefulFreezeMockBackend {
+    fn info(&self) -> &WorldInfo {
+        &self.info
+    }
+
+    fn ping(&mut self, nonce: u64) -> Result<PingReply, SandboxError> {
+        let state = if self.frozen {
+            AgentState::Frozen {
+                disk_clean: self.disk_clean,
+            }
+        } else {
+            AgentState::Ready
+        };
+        Ok(PingReply {
+            nonce,
+            state,
+            uptime_ms: 10,
+            pid: 1,
+            epoch_generation: 0,
+        })
+    }
+
+    fn exec_streaming(
+        &mut self,
+        req: ExecRequest,
+        _on_chunk: &mut dyn FnMut(ExecOutputChunk),
+    ) -> Result<ExecReply, SandboxError> {
+        if self.frozen {
+            return Err(SandboxError::GuestError {
+                code: ErrorCode::AgentFrozen,
+                message: "world is frozen".to_owned(),
+            });
+        }
+        Ok(ExecReply {
+            exec_id: req.exec_id,
+            exit_code: Some(0),
+            signal: None,
+            timed_out: false,
+            cgroup_killed: false,
+            duration_ms: 1,
+            stdout: Default::default(),
+            stderr: Default::default(),
+        })
+    }
+
+    fn freeze_and_sync(&mut self, opts: FreezeOptions) -> Result<FreezeReply, SandboxError> {
+        if self.frozen {
+            return Err(SandboxError::GuestError {
+                code: ErrorCode::InvalidStateTransition,
+                message: "already frozen".to_owned(),
+            });
+        }
+        self.frozen = true;
+        self.disk_clean = opts.perform_syncfs;
+        Ok(FreezeReply {
+            disk_clean: opts.perform_syncfs,
+            frozen_elapsed_ms: 1,
+            syncfs_elapsed_ms: 1,
+            synced_paths: usize::from(opts.perform_syncfs),
+        })
+    }
+
+    fn unfreeze(&mut self, timeout: Duration) -> Result<(), SandboxError> {
+        if !self.frozen {
+            return Err(SandboxError::GuestError {
+                code: ErrorCode::InvalidStateTransition,
+                message: "world is not frozen".to_owned(),
+            });
+        }
+        if timeout.is_zero() {
+            return Err(SandboxError::InvalidConfig(
+                "unfreeze timeout must be > 0".to_owned(),
+            ));
+        }
+        self.frozen = false;
+        self.disk_clean = false;
+        self.unfreeze_calls += 1;
+        Ok(())
+    }
+
+    fn destroy(&mut self) -> Result<(), SandboxError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn world_handle_freeze_unfreeze_resume_exec_lifecycle() {
+    let info = WorldInfo {
+        world_id: WorldId::random(),
+        epoch: EpochId::new(2).unwrap(),
+        driver_name: "stateful-mock",
+        host_pid: Some(100),
+        cgroup_path: None,
+        seccomp_enabled: true,
+        userns_enabled: true,
+        netns_isolated: true,
+    };
+    let backend = StatefulFreezeMockBackend {
+        info,
+        frozen: false,
+        disk_clean: false,
+        unfreeze_calls: 0,
+    };
+    let mut handle = WorldHandle::from_backend(Box::new(backend));
+
+    // Unfreeze before freeze -> InvalidStateTransition.
+    let err = handle.unfreeze(Duration::from_secs(5)).unwrap_err();
+    assert!(matches!(
+        err,
+        SandboxError::GuestError {
+            code: ErrorCode::InvalidStateTransition,
+            ..
+        }
+    ));
+
+    // Exec -> FreezeAndSync -> Exec blocked (AgentFrozen) -> Ping Frozen.
+    assert_eq!(
+        handle
+            .exec(ExecRequest::new("pre-freeze", vec!["/bin/true".into()]))
+            .unwrap()
+            .exit_code,
+        Some(0)
+    );
+    let f = handle.freeze_and_sync(FreezeOptions::disk_clean()).unwrap();
+    assert!(f.disk_clean);
+    assert!(matches!(
+        handle.ping(10).unwrap().state,
+        AgentState::Frozen { disk_clean: true }
+    ));
+    assert!(matches!(
+        handle.exec(ExecRequest::new("blocked", vec!["/bin/true".into()])),
+        Err(SandboxError::GuestError {
+            code: ErrorCode::AgentFrozen,
+            ..
+        })
+    ));
+
+    // Unfreeze -> Ping Ready -> subsequent Exec succeeds!
+    handle.unfreeze(Duration::from_secs(5)).unwrap();
+    assert_eq!(handle.ping(11).unwrap().state, AgentState::Ready);
+    assert_eq!(
+        handle
+            .exec(ExecRequest::new("post-unfreeze", vec!["/bin/true".into()]))
+            .unwrap()
+            .exit_code,
+        Some(0)
+    );
 }

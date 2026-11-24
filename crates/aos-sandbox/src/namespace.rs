@@ -245,6 +245,36 @@ mod linux_impl {
             })
         }
 
+        fn unfreeze(&mut self, timeout: Duration) -> Result<(), SandboxError> {
+            self.check_usable()?;
+            if !self.frozen {
+                return Err(SandboxError::GuestError {
+                    code: ErrorCode::InvalidStateTransition,
+                    message: "world is not frozen".to_owned(),
+                });
+            }
+            if timeout.is_zero() {
+                return Err(SandboxError::InvalidConfig(
+                    "unfreeze timeout must be > 0".to_owned(),
+                ));
+            }
+            let cg = self.world_cgroup.as_ref().ok_or_else(|| {
+                SandboxError::InvalidConfig(
+                    "unfreeze requires enable_cgroup=true on NamespaceDriver".to_owned(),
+                )
+            })?;
+            let ctrl = CgroupV2Controller::new(cg);
+            ctrl.set_freeze_and_wait(false, timeout).map_err(|e| {
+                SandboxError::GuestError {
+                    code: ErrorCode::UnfreezeFailed,
+                    message: e.to_string(),
+                }
+            })?;
+            self.frozen = false;
+            self.frozen_disk_clean = false;
+            Ok(())
+        }
+
         fn destroy(&mut self) -> Result<(), SandboxError> {
             if self.destroyed {
                 return Ok(());

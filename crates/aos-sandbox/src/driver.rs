@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Write};
+use std::time::Duration;
+
+use aos_guest::ErrorCode;
 
 use crate::config::{
     ExecOutputChunk, ExecReply, ExecRequest, FreezeOptions, FreezeReply, PingReply, SpawnWorldSpec,
@@ -23,6 +26,13 @@ pub trait WorldBackend: Send {
     ) -> Result<ExecReply, SandboxError>;
 
     fn freeze_and_sync(&mut self, opts: FreezeOptions) -> Result<FreezeReply, SandboxError>;
+
+    /// Unfreeze a previously frozen `World` (e.g. after `TreeStore::snapshot_readonly`
+    /// during `agentd`'s `Checkpoint` flow) so execution can resume cleanly.
+    ///
+    /// Returns [`SandboxError::GuestError`] with [`ErrorCode::InvalidStateTransition`]
+    /// if the world is not currently frozen.
+    fn unfreeze(&mut self, timeout: Duration) -> Result<(), SandboxError>;
 
     /// Deterministically terminate all sandbox processes (`cgroup.kill`), reap child,
     /// and clean up cgroup/netns resources. Must be idempotent.
@@ -100,6 +110,12 @@ impl WorldHandle {
         self.backend.freeze_and_sync(opts)
     }
 
+    /// Unfreeze a frozen world so execution can resume after snapshot capture.
+    pub fn unfreeze(&mut self, timeout: Duration) -> Result<(), SandboxError> {
+        self.ensure_alive()?;
+        self.backend.unfreeze(timeout)
+    }
+
     /// Deterministically tear down the world (`cgroup.kill` + reap + cleanup).
     /// Idempotent if called more than once.
     pub fn destroy(&mut self) -> Result<(), SandboxError> {
@@ -120,11 +136,14 @@ impl Drop for WorldHandle {
     }
 }
 
+type UnfreezeHook = Box<dyn FnMut(Duration) -> Result<(), SandboxError> + Send>;
+
 /// Generic [`WorldBackend`] adapter wrapping a [`crate::client::GuestRpcClient`] plus a
-/// teardown hook (used by `NamespaceDriver` and cross-platform mock/in-memory transports).
+/// teardown hook (used by cross-platform mock/in-memory transports).
 pub struct RpcWorldBackend<R, W, D> {
     info: WorldInfo,
     client: crate::client::GuestRpcClient<R, W>,
+    on_unfreeze: Option<UnfreezeHook>,
     on_destroy: Option<D>,
 }
 
@@ -142,8 +161,18 @@ where
         Self {
             info,
             client,
+            on_unfreeze: None,
             on_destroy: Some(on_destroy),
         }
+    }
+
+    /// Attach a custom `unfreeze` handler for testing or host-controlled backends.
+    pub fn with_unfreeze_hook<F>(mut self, hook: F) -> Self
+    where
+        F: FnMut(Duration) -> Result<(), SandboxError> + Send + 'static,
+    {
+        self.on_unfreeze = Some(Box::new(hook));
+        self
     }
 }
 
@@ -171,6 +200,16 @@ where
 
     fn freeze_and_sync(&mut self, opts: FreezeOptions) -> Result<FreezeReply, SandboxError> {
         self.client.freeze_and_sync(opts)
+    }
+
+    fn unfreeze(&mut self, timeout: Duration) -> Result<(), SandboxError> {
+        if let Some(hook) = &mut self.on_unfreeze {
+            return hook(timeout);
+        }
+        Err(SandboxError::GuestError {
+            code: ErrorCode::InvalidStateTransition,
+            message: "unfreeze is not configured on RpcWorldBackend".to_owned(),
+        })
     }
 
     fn destroy(&mut self) -> Result<(), SandboxError> {
