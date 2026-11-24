@@ -1,6 +1,6 @@
 # 跨设备研发交接与进度基线（Handoff & Progress State）
 
-> **最新同步状态**：**Phase 0 Track A Gate 2 全面通过（`PASS`）！** `F0-1 ~ F0-8` 全部八大证伪实验已在原生 Linux / WSL2 KVM（`wsl -d Forkloom-Dev`，Ubuntu 24.04，Linux `6.18.58.1-WSL2`，AMD Ryzen 7 5800H `svm=8`，Firecracker `v1.10.1`，自研 Guest Linux `6.6.87` + 静态 `aos-guest` PID-1）实机跑通并通过红队 `fsck` Gate 2 审计（`0 P0 / 0 P1`）。**Phase 1（MVP v0.1：`aos-store` / `aos-sandbox` / `proto/forkloom/v1` / `agentd` / `aos-cli`）现已正式启动（Active）！**（正式性能基线仍须按铁律 2 在 Track B 裸金属采集。）
+> **最新同步状态**：**Phase 1 Cold Fork MVP `v0.1.0` 已正式封版（Sealed & Tagged `v0.1.0`）！** 全仓 8 大核心 Rust crate（`aos-types`, `aos-store`, `aos-meta`, `aos-sandbox`, `aos-gw`, `aos-guest`, `agentd`, `aos-cli`）及 Python（`forkloom-vm` `0.1.0a0`）/ TypeScript（`@forkloom-vm/sdk` `0.1.0-alpha.0`）双语薄 gRPC-over-UDS SDK 已在 Windows 与原生 Linux / WSL2（`wsl -d Forkloom-Dev`，Ubuntu 24.04，Linux `6.18.58.1-WSL2`）完成全链路实机闭环验证，全部通过红队 `fsck` 终审门禁（**`0 P0 / 0 P1`**）。下一里程碑：**Phase 2 — Firecracker Live Hot-Fork Engine（`v0.5`）**。
 
 ---
 
@@ -32,9 +32,9 @@ cd ~/work/forkloom-vm/forkloom
 cargo test --workspace
 ```
 
-### 4. 在新电脑上无缝唤醒 5 人特战队（IDE 无关）
-在原生 Linux / WSL2 环境直接打开 `~/work/forkloom-vm/forkloom`（支持 Antigravity Swarm / Antigravity IDE / Cursor / VS Code 等任意客户端）。根目录的 `AGENTS.md` 会自动注入工程红线与当前 Swarm 异构编制（`Arch-Zero` / `fsck` / `Forge` / `Mach` / `Scout`）。直接对主控会话说：
-> **“请阅读 `AGENTS.md` 和 `docs/HANDOFF.md`，按 `Arch-Zero` 总控身份接手项目，继续推进 Phase 0 下半场（F0-5 ~ F0-8）与 Gate 2 评审。”**
+### 4. 在新电脑上无缝唤醒分级特战队（IDE 无关）
+在原生 Linux / WSL2 环境直接打开 `~/work/forkloom-vm/forkloom`（支持 Antigravity Swarm / Antigravity IDE / Cursor / VS Code 等任意客户端）。根目录的 `AGENTS.md` 会自动注入五条工程红线与 7 角色异构分级编队（`fsck` [`gemini-4-carbon-high`] / `Forge` / `Arch-Zero` / `Mach` / `SDK` / `Scout` / `monitor`；专项短期工位 `store` 与 `gw` 已完成 Phase 1 历史使命并按纪律退役）。直接对主控会话说：
+> **“请阅读 `AGENTS.md` 和 `docs/HANDOFF.md`，按 `Arch-Zero` 总控身份接手项目，基于 `v0.1.0` 冷分叉封版基线启动 Phase 2（Firecracker 热分叉引擎 `v0.5`）。”**
 
 ---
 
@@ -65,14 +65,44 @@ cargo test --workspace
      - **F0-5（512 MiB 恢复至 `aos-guest` 首条 `Exec /bin/uname -r` 返回）— `PASS`**：冷恢复 `mincore` 捕获 **14.2%** 工作集（`72.64 MiB`，4 extents）；Advisory 端到端 p50：`cold_cache` `90.8 ms`、`hot_cache` `42.9 ms`（对比纯 VMM API `2.32 ms`，印证铁律 2）、`mincore+WILLNEED` `83.4 ms`（含预热）/ `71.6 ms`（预热后）。
      - **F0-7（2 路并发隔离 `netns` 克隆唯一性与回环存活）— `PASS`**：`aos-guest` PID-1 自动拉起 `lo`（零手工 `ip link set lo up`），`FCVMGID:00` + `RNDADDENTROPY`/`RNDRESEEDCRNG` 产出 **2/2 唯一 64B `/dev/urandom`（251/512-bit 汉明距离）**，`NETLINK_SOCK_DIAG` `SOCK_DESTROY` 在 **`0.04 ms`** 内切断外部 TCP（`ECONNABORTED`）同时原 `127.0.0.1:18080` 回环连接池持续正常收发。
    - **[重要实机硬件发现 — AMD Zen 3 + Linux 6.18 KVM + Firecracker v1.10.1]**：在 AMD Ryzen 7 5800H（Zen 3）+ Linux 6.18 宿主内核上恢复 Firecracker `v1.10.1` 快照时，因 `KVM_GET_XSAVE` / `KVM_SET_XSAVE` 未覆盖完整 `XSAVES` 状态，Guest 执行 `XRSTORS` 会触发 `#GP`（`Bad FPU state detected at restore_fpregs_from_fpstate`）。**对策**：Guest `boot_args` 必须携带 **`noxsaves`**，或在 Phase 1/2 将 Firecracker 基线升级至 **`v1.11+ / v1.12+`（启用 `KVM_GET_XSAVE2`）**。
+6. **Phase 1 Cold Fork MVP（`v0.1.0`）全栈完成并通过 `fsck` Gate 终审（`0 P0 / 0 P1`）**：
+   - **`crates/aos-store`（Btrfs `TreeStore` + `openat2` + 零信任补丁导出，`#58 PASS`）**：
+     - 编译期密封 `StorageKind`（`Tree` vs `Block`，`BlockImageHandle` 零宿主 `mount` API 并带 `compile_fail` doctest）；
+     - Linux Btrfs 池护栏（拒绝 `/mnt/*`、`9p`、非 `BTRFS_SUPER_MAGIC`、`autodefrag` 及已启用 `qgroups`）与 `ballast` 预分配/池满 `ENOSPC` 自动释放重试；
+     - `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS)` 逐级受限解包 `import_tar` + `BTRFS_SUBVOL_RDONLY` + `PersistProof::fsync_subvolume`、`create_writable_clone`、`snapshot_readonly`、`destroy_subvolume`、`TreeStoreRecoveryHooks` 及经 `Untrusted<RawPatchBundle>` -> `PatchPathValidator` 强校验的 `export_patch`（含 3 项 Linux 实机 loop-Btrfs 集成测试）。
+   - **`crates/aos-sandbox`（加固 `NamespaceDriver` 冷分叉与冻结/解冻，`#61 / #72 PASS`）**：
+     - `clone3(CLONE_INTO_CGROUP | CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWNET)` 原子落入 `/sys/fs/cgroup/forkloom.slice/epoch-<e>/w-<id>`；
+     - `pivot_root(".", ".")` + `MNT_DETACH`、`/tmp`（64m）与 `/dev/shm`（64m）配额挂载、`SYS_close_range(4, ~0U, CLOSE_RANGE_CLOEXEC)`、全能力集清零、`PR_SET_NO_NEW_PRIVS` 及纯 Rust `x86_64` `seccomp-bpf`（`BTRFS_IOCTL_MAGIC 0x94` 返回 `EOPNOTSUPP`，`clone3` 返回 `ENOSYS` 回退 `clone(2)`，阻断 19 项高危系统调用）；
+     - 宿主侧 `WorldHandle::freeze_and_sync`（冻结 `w-<id>` cgroup + `syncfs`）与 `WorldHandle::unfreeze`（支持 `Checkpoint` 后沙箱无缝继续执行）及 `destroy()`（`cgroup.kill` 零残留进程）。
+   - **`crates/aos-gw`（零信任出网网关与哈希链加密审计，`#79 PASS`）**：
+     - `EpochFenceRegistry` 绑定 `(slot_id, world_id, daemon_epoch)`，`advance_epoch` 立即作废旧纪元绑定并触发 `CancellationToken` 中断在途流；
+     - `L1ProxyServer` 显式 HTTP/1.1 反向代理（`host + path_prefix + methods` 细粒度路由、宿主侧凭证注入、反路径走私及直连已校验 `SocketAddr` 的反 DNS 重绑定 SSRF 防护）；
+     - `DomainAllowlist` L3 域名白名单（默认 `NXDOMAIN`、阻断 34 类多租户共享 CDN 后缀及 UDP/QUIC-443）；
+     - `ReflectionScanner` 跨任意分块边界滑动窗口防凭证反射扫描（Raw / Base64 多相移 / Hex / URL 编码）；
+     - `AuditStore` 独立 `0600` 密钥槽（存于 `redb` 之外）+ `XChaCha20-Poly1305` 与 `blake3` 哈希链加密审计段（`.aseg`）+ 双遍覆写 `crypto_shred`。
+   - **`proto/forkloom/v1` + `crates/agentd` + `crates/aos-cli`（控制面与生产全链路闭环，`#63 / #74 / #87 PASS`）**：
+     - 完整 17 项 gRPC 接口（`SystemService::NegotiateVersion`、`FrameService` 9 项含流式 `ImportTar`、`WorldService` 7 项含流式 `Exec` 与 `Checkpoint`），携带 `x-forkloom-error-bin` 结构化 `ErrorDetail`（`WorldLost` / `OutcomeUnknown` / `FencedOut`）及全参数长度前缀 BLAKE3 幂等摘要与 per-key 并发锁；
+     - 严格仅监听 `0600` Unix Domain Socket（`0700` 父目录 + 符号链接拒绝，**零 TCP 监听端口**）；
+     - `--backend production` 全量接入 `TreeStoreBackend`、`NamespaceSandboxBackend`、`ProductionRecoveryHooks`（R2 推进 `aos-gw` 纪元围栏 + 强杀旧纪元 cgroup + 回收残留世界子卷，R3–R6 Btrfs 子卷清理）及 `DestroyWorld` 自动解绑网关槽位与 `AuditStore::crypto_shred`（含 `linux_cold_fork_e2e.rs` 与 `gateway_integration_tests.rs` 实机测试全绿）。
+   - **`sdk/python` & `sdk/typescript`（双语薄 gRPC-over-UDS SDK 与并发冷分叉 E2E，`#78 / #91 PASS`）**：
+     - Python `forkloom-vm`（`0.1.0a0`）与 TypeScript `@forkloom-vm/sdk`（`0.1.0-alpha.0`）完整覆盖 17 项 RPC、强制 `NegotiateVersion` 握手、自动规范化 `unix://` `:authority` 头及 20 类结构化异常解码；
+     - WSL2 Linux 实机接入 `agentd --backend production` 端到端测试全绿：Python 4 路 SWE-bench 并发冷分叉采样 + 隔离变更 + `Checkpoint` + 解冻继续执行 + `ExportPatch` 耗时 **`0.31s` [`AdvisoryWsl2`]**，TypeScript 实机全链路 E2E 耗时 **`0.30s` [`AdvisoryWsl2`]**，测试后验证 **`0` 残留进程、`0` Btrfs 挂载、`0` loop 设备、`0` 残留子 cgroup**。
 
 ---
 
-## 三、当前阶段任务清单（Active：Phase 1 MVP v0.1 单机冷分叉闭环）
+## 三、下一阶段任务清单（Next：Phase 2 — Firecracker Live Hot-Fork Engine `v0.5`）
 
-1. **`crates/aos-store`（`store` 负责）**：实现编译期双模隔离（`Tree` / `Block`）、Btrfs `TreeStore` 池护栏（拒绝 `qgroups` / `autodefrag`、管理 `ballast`）、`openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS)` 安全 `import_tar`、`create_writable_clone` / `snapshot_readonly` / `destroy_subvolume` 及经 `Untrusted<PatchBundle>` + `PatchPathValidator` 强校验的 `export_patch`。
-2. **`crates/aos-sandbox`（`Forge` 负责）**：实现 `SandboxDriver` + `NamespaceDriver`（`userns`/`mountns`/`pivot_root`/`pidns`/`ipcns`/`utsns`/`netns`、`clone3(CLONE_INTO_CGROUP)`、`PR_SET_NO_NEW_PRIVS` + 降权、严格 `seccomp-bpf` 含 `BTRFS_IOCTL_MAGIC` 返回 `EOPNOTSUPP`）并经继承 `socketpair` 与沙箱内静态 `aos-guest` 通信。
-3. **`proto/forkloom/v1/runtime.proto` + `crates/agentd` + `crates/aos-cli`（`Mach` 负责）**：完善 `FrameService` / `WorldService` gRPC 契约（含 `IdempotencyKey`、`FencingToken`、`WorldLost`/`OutcomeUnknown`/`FencedOut` 语义）、构建仅监听 `0600` Unix Domain Socket 的 `agentd` 控制面（接入 `aos-meta` 与 `TreeStore`/`NamespaceDriver` 抽象）及配套 `aos` CLI。
-4. **Track B 裸金属基准补采（待租用 Stage 1 裸金属主机）**：在非嵌套裸金属 NVMe 主机补采 `F0-1/F0-2/F0-5/F0-6` 可外发权威延迟与 16 路克隆 `PSS` 基线。
+1. **`crates/aos-store` `BlockStore` 与 `Inspector VM` 块级补丁提取（`Forge` 负责）**：
+   - 实现 `BlockStore`（`StoreObject<Block>` Btrfs `FICLONE` 块镜像克隆、零宿主挂载铁律）与只读无网 `Inspector VM`（`inspector.cpio.zst`）块级 Diff 提取并接入 `Untrusted<RawPatchBundle>` -> `PatchPathValidator`。
+2. **`crates/aos-sandbox` `FirecrackerDriver` 热分叉与 `Volatile`/`Durable` 双档记忆帧（`Forge` 负责）**：
+   - 严格按 `Guest FreezeAndSync -> VMM Paused -> Snapshot Create -> Disk FICLONE -> fsync -> VMM Resume -> PostForkReseed (VMGenID + 熵重种 + SOCK_DESTROY)` 顺序实现微虚拟机热快照与 O(1) `MAP_PRIVATE` 内存共享恢复；
+   - 在 AMD Zen 3 + Linux 6.18 宿主默认启用 `noxsaves` 或升级 Firecracker `v1.11+`（`KVM_GET_XSAVE2`）。
+3. **`agentd` / `aos-cli` / SDK 热分叉编排与池水位保护（`Mach` + `SDK` 负责）**：
+   - 在 `agentd` 接入 `FirecrackerDriver`（`--driver firecracker`）、`Volatile` `tmpfs` 配额水位监控与 `Durable` 异步晋升（Promotion）。
+4. **已登记的非阻塞 P2 演进项（Phase 2/3 收敛）**：
+   - `aos-store`：`safe_tar` 在 `reject_dotgit=false` 时将常规文件/硬链接 `.git` 代理路径一并纳入整包大小写/Unicode-NFD 折叠冲突检查；`import_local_dir` 改为流式管道以限制超大本地工作区峰值 RSS。
+   - `agentd` + `aos-gw`：Phase 3 启用强制加密审计时，在 `CreateWorld` 传播 `AuditStore::ensure_world` I/O 错误，并在启动恢复阶段自动清扫已 `Destroyed` 世界的残留 `.key` 槽位。
+   - `sdk/typescript`：`live_e2e.test.ts` 在外部传入 `FORKLOOM_LIVE_SOCKET` 模式下使用独立临时目录初始化 `baseDir` 并显式关闭临时文件描述符。
+5. **Track B 裸金属基准补采（待租用 Stage 1 裸金属主机）**：在非嵌套裸金属 NVMe 主机补采 `F0-1/F0-2/F0-5/F0-6` 与 Phase 1/2 可外发权威延迟及 16 路克隆 `PSS` 基线。
 
-> **备忘**：`ARCHITECTURE_V2.md` 已新增第七节《控制面编排契约、统一客体代理与扩展隔离边界（v2.2 架构补强）》（统一 `aos-guest` 客体代理、分层幂等与 `WorldLost`/`OutcomeUnknown` 契约、租约分层与围栏令牌、`NamespaceDriver` 加固基线、远程控制面前置隔离），路线图顺延为第八节；同时已将 `meta/forkloom.redb` 位置表述对齐上文分盘定论。另将 **Linux 6.7+ Btrfs `squota` 快照性能测试**列入 Phase 1 `TreeStore` 单沙箱配额前置验证候选。
+> **备忘**：`AGENTS.md` 已确立 7 角色分级模型编制（`fsck` 首选 `gemini-4-carbon-high` / `claude-opus-5-5-high` 把守 P0 门禁，常规研发与 SDK 采用 `Medium` / `Flash Medium`，专项工位 `store` 与 `gw` 已按即审即退原则退役）。`ARCHITECTURE_V2.md` 第七节（v2.2 补强）与 `meta/forkloom.redb` 独立 `ext4/XFS` 分盘定论已在 Phase 1 `v0.1.0` 生产代码中 100% 落地验证。
