@@ -1076,6 +1076,12 @@ fn kill_and_remove_epoch_cgroup_tree(epoch_dir: &Path) {
                     let empty = fs::read_to_string(child_path.join("cgroup.procs"))
                         .map(|s| s.trim().is_empty())
                         .unwrap_or(true);
+                    // `rmdir` fails while a nested cgroup (the world's `exec`) still exists.
+                    for nested in fs::read_dir(&child_path).into_iter().flatten().flatten() {
+                        if nested.path().is_dir() {
+                            let _ = fs::remove_dir(nested.path());
+                        }
+                    }
                     if empty && fs::remove_dir(&child_path).is_ok() {
                         break;
                     }

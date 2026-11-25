@@ -5,10 +5,13 @@
 
 use std::fs::File;
 use std::io;
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::FileExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,11 +30,45 @@ use crate::truncation::drain_stream;
 
 static PREFREEZE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Exec cgroup created and owned by the host, reachable only through two inherited fds.
+///
+/// The sandbox has no cgroupfs, and the files belong to an unmapped host id, so workloads can
+/// neither leave this cgroup nor reopen the fds through `/proc/1/fd`.
+#[derive(Debug)]
+struct InheritedExecCgroup {
+    /// `cgroup.procs`, opened read-write.
+    procs: File,
+    /// `cgroup.kill`, opened write-only.
+    kill: File,
+}
+
+impl InheritedExecCgroup {
+    fn is_empty(&self) -> io::Result<bool> {
+        let mut buf = [0u8; 16];
+        Ok(self.procs.read_at(&mut buf, 0)? == 0)
+    }
+
+    /// Kill every process left in the cgroup; returns `true` only if there were any (or
+    /// `forced_kill` is set).
+    fn kill_all(&self, forced_kill: bool) -> io::Result<bool> {
+        let had_live_procs = forced_kill || !self.is_empty()?;
+        if had_live_procs {
+            self.kill.write_at(b"1", 0)?;
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while !self.is_empty()? && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(had_live_procs)
+    }
+}
+
 /// Production Linux backend for `aos-guest` (Firecracker `vsock` and `NamespaceDriver` `socketpair`).
 #[derive(Debug, Clone)]
 pub struct LinuxGuestBackend {
     cgroup: CgroupV2Controller,
     enable_cgroup_isolation: bool,
+    inherited_exec: Option<Arc<InheritedExecCgroup>>,
 }
 
 impl Default for LinuxGuestBackend {
@@ -45,7 +82,29 @@ impl LinuxGuestBackend {
         Self {
             cgroup: CgroupV2Controller::new(workload_cgroup),
             enable_cgroup_isolation,
+            inherited_exec: None,
         }
+    }
+
+    /// Run every `Exec` in the host-owned cgroup behind the given inherited fds
+    /// (`NamespaceDriver`) instead of in guest-created sub-cgroups.
+    pub fn with_inherited_exec_cgroup(procs_fd: RawFd, kill_fd: RawFd) -> io::Result<Self> {
+        let mut backend = Self::new(DEFAULT_WORKLOAD_CGROUP, false);
+        backend.inherited_exec = Some(Arc::new(InheritedExecCgroup {
+            procs: linux_sys::file_from_inherited_fd(procs_fd)?,
+            kill: linux_sys::file_from_inherited_fd(kill_fd)?,
+        }));
+        Ok(backend)
+    }
+
+    /// Kill whatever is left of the current `Exec`.
+    fn kill_exec(&self, sub_cgroup: Option<&Path>, forced_kill: bool) -> bool {
+        if let Some(cg) = &self.inherited_exec {
+            // The host re-checks and kills the cgroup after every Exec, so an error here only
+            // delays cleanup.
+            return cg.kill_all(forced_kill).unwrap_or(false);
+        }
+        sub_cgroup.is_some_and(|dir| self.kill_and_cleanup_subcgroup(dir, forced_kill))
     }
 
     pub fn cgroup(&self) -> &CgroupV2Controller {
@@ -288,6 +347,9 @@ impl GuestBackend for LinuxGuestBackend {
             linux_sys::attach_child_to_cgroup(&mut cmd, dir.join("cgroup.procs"))
                 .map_err(|e| BackendError::new(ErrorCode::ExecFailed, e.to_string()))?;
         }
+        if let Some(cg) = &self.inherited_exec {
+            linux_sys::attach_child_to_cgroup_fd(&mut cmd, cg.procs.as_raw_fd());
+        }
 
         let spawn_guard = linux_sys::begin_child_spawn();
         let mut child = match cmd.spawn() {
@@ -379,9 +441,7 @@ impl GuestBackend for LinuxGuestBackend {
                 if exited_status.is_none() {
                     match child.try_wait() {
                         Ok(Some(st)) => {
-                            if let Some(dir) = &sub_cgroup {
-                                cgroup_killed = self.kill_and_cleanup_subcgroup(dir, false);
-                            }
+                            cgroup_killed = self.kill_exec(sub_cgroup.as_deref(), false);
                             exited_status = Some(Ok(st));
                         }
                         Ok(None) => {
@@ -389,17 +449,13 @@ impl GuestBackend for LinuxGuestBackend {
                                 && Instant::now() >= dl
                             {
                                 timed_out = true;
-                                if let Some(dir) = &sub_cgroup {
-                                    cgroup_killed = self.kill_and_cleanup_subcgroup(dir, true);
-                                }
+                                cgroup_killed = self.kill_exec(sub_cgroup.as_deref(), true);
                                 let _ = child.kill();
                                 exited_status = Some(child.wait());
                             }
                         }
                         Err(e) => {
-                            if let Some(dir) = &sub_cgroup {
-                                cgroup_killed = self.kill_and_cleanup_subcgroup(dir, true);
-                            }
+                            cgroup_killed = self.kill_exec(sub_cgroup.as_deref(), true);
                             exited_status = Some(Err(e));
                         }
                     }

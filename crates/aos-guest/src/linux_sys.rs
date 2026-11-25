@@ -435,6 +435,14 @@ impl VsockListener {
 /// Explicitly sets `FD_CLOEXEC` on `fd` before wrapping so untrusted `Exec` child
 /// processes can never inherit the host control channel.
 pub fn stream_from_inherited_fd(fd: RawFd) -> io::Result<(File, File)> {
+    let reader = file_from_inherited_fd(fd)?;
+    // `File::try_clone()` uses `F_DUPFD_CLOEXEC` on Unix so `writer` is also `FD_CLOEXEC`.
+    let writer = reader.try_clone()?;
+    Ok((reader, writer))
+}
+
+/// Adopt an inherited file descriptor, setting `FD_CLOEXEC` so `Exec` children never see it.
+pub fn file_from_inherited_fd(fd: RawFd) -> io::Result<File> {
     if fd < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -455,11 +463,8 @@ pub fn stream_from_inherited_fd(fd: RawFd) -> io::Result<(File, File)> {
             return Err(io::Error::last_os_error());
         }
     }
-    // SAFETY: `fd` is validated open, marked `FD_CLOEXEC`, and dedicated to this agent's transport.
-    let reader = unsafe { File::from_raw_fd(fd) };
-    // `File::try_clone()` uses `F_DUPFD_CLOEXEC` on Unix so `writer` is also `FD_CLOEXEC`.
-    let writer = reader.try_clone()?;
-    Ok((reader, writer))
+    // SAFETY: `fd` is validated open, marked `FD_CLOEXEC`, and dedicated to this agent.
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 /// Bring up the loopback interface (`lo`) with `IFF_UP | IFF_RUNNING` during PID-1 init.
@@ -536,6 +541,24 @@ pub fn mount_pid1_filesystems() {
                 ptr::null(),
             )
         };
+    }
+}
+
+/// Attach a `pre_exec` hook moving the forked child into the cgroup whose `cgroup.procs` the
+/// host opened as `procs_fd`; `procs_fd` must stay open until the command has been spawned.
+pub fn attach_child_to_cgroup_fd(cmd: &mut Command, procs_fd: RawFd) {
+    // SAFETY: The closure runs between `fork` and `exec` and only invokes the async-signal-safe
+    // `write` syscall with a static payload.
+    unsafe {
+        cmd.pre_exec(move || {
+            let payload = b"0\n";
+            let written =
+                libc::write(procs_fd, payload.as_ptr().cast::<libc::c_void>(), payload.len());
+            if written < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
 }
 

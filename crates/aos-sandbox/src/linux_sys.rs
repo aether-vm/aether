@@ -186,6 +186,8 @@ pub struct ChildLaunchPlan {
     /// `(source, target relative to rootfs)`.
     pub agent_bind: Option<(AgentBindSource, CString)>,
     pub hostname: Vec<u8>,
+    /// Fds (all above [`GUEST_CONTROL_FD`]) left open across `execve` for `aos-guest`.
+    pub inherit_fds: Vec<RawFd>,
     pub exec_path: CString,
     pub argv_storage: Vec<CString>,
     pub argv_ptrs: Vec<*const libc::c_char>,
@@ -302,6 +304,17 @@ pub fn split_owned_fd(fd: OwnedFd) -> io::Result<(File, File)> {
     let reader = File::from(fd);
     let writer = reader.try_clone()?;
     Ok((reader, writer))
+}
+
+/// Duplicate `fd` (`FD_CLOEXEC`) to a number the child's 0..=3 rewiring cannot collide with.
+pub fn dup_above_control_fd(fd: RawFd) -> io::Result<OwnedFd> {
+    // SAFETY: `fcntl` takes no pointers here.
+    let new = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10) };
+    if new < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the kernel just returned this fd and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(new) })
 }
 
 /// Clone the mount at `path` (never following a trailing symlink) into a detached, private mount.
@@ -840,6 +853,11 @@ unsafe fn run_child_setup(
         );
         if cr_rc != 0 {
             fail_child(err_wr_fd, ChildStage::CloseRange, raw_errno());
+        }
+        for fd in &plan.inherit_fds {
+            if libc::fcntl(*fd, libc::F_SETFD, 0) != 0 {
+                fail_child(err_wr_fd, ChildStage::CloseRange, raw_errno());
+            }
         }
 
         // 10. Drop all workload capabilities.

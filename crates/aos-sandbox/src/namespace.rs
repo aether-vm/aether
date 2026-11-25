@@ -48,7 +48,7 @@ impl SandboxDriver for NamespaceDriver {
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use std::ffi::CString;
-    use std::fs::{self, File};
+    use std::fs::{self, File, OpenOptions};
     use std::io::{self, Read, Write};
     use std::os::fd::{AsRawFd, OwnedFd, RawFd};
     use std::path::{Path, PathBuf};
@@ -72,6 +72,9 @@ mod linux_impl {
 
     const HANDSHAKE_NONCE: u64 = 0x464C_4F4F_4D01;
     const EXEC_SOCKET_TIMEOUT_GRACE: Duration = Duration::from_secs(2);
+    /// Child of `w-<id>` holding the processes of the current `Exec` (`aos-guest` stays outside).
+    const EXEC_CGROUP: &str = "exec";
+    const EXEC_KILL_TIMEOUT: Duration = Duration::from_secs(1);
     const DEFAULT_FREEZE_TIMEOUT: Duration = Duration::from_secs(5);
 
     struct NamespaceWorldBackend {
@@ -155,8 +158,23 @@ mod linux_impl {
             // Always reset host socket timeout afterward.
             let _ = linux_sys::set_socket_timeout(self.sock_raw_fd, None);
 
+            // Host-enforced §7.1: nothing of this Exec survives it, whatever aos-guest did.
+            let killed = match &self.world_cgroup {
+                Some(cg) => match kill_exec_cgroup(&cg.join(EXEC_CGROUP)) {
+                    Ok(killed) => killed,
+                    Err(e) => {
+                        self.poisoned = true;
+                        return Err(e);
+                    }
+                },
+                None => false,
+            };
+
             match res {
-                Ok(reply) => Ok(reply),
+                Ok(mut reply) => {
+                    reply.cgroup_killed |= killed;
+                    Ok(reply)
+                }
                 Err(err @ (SandboxError::Codec(_) | SandboxError::Io(_))) => {
                     // Poison transport so a late frame from a timed-out guest cannot
                     // desynchronize subsequent req_ids.
@@ -318,8 +336,11 @@ mod linux_impl {
             // Leaf world cgroup MUST use `create_dir` (never silently reuse a colliding world).
             fs::create_dir(&path).map_err(|e| SandboxError::cgroup(&path, e))?;
             // Limits are in place before `clone3` puts the first task into the world.
-            if let Err(e) = write_cgroup_limits(&path, &spec.limits) {
-                let _ = fs::remove_dir(&path);
+            let exec_cg = path.join(EXEC_CGROUP);
+            if let Err(e) = write_cgroup_limits(&path, &spec.limits).and_then(|()| {
+                fs::create_dir(&exec_cg).map_err(|e| SandboxError::cgroup(&exec_cg, e))
+            }) {
+                remove_world_cgroup(&path);
                 return Err(e);
             }
             Some(path)
@@ -331,7 +352,7 @@ mod linux_impl {
             Some(path) => match linux_sys::open_dir_nofollow_cloexec(path) {
                 Ok(fd) => Some(fd),
                 Err(e) => {
-                    let _ = fs::remove_dir(path);
+                    remove_world_cgroup(path);
                     return Err(SandboxError::cgroup(path, e));
                 }
             },
@@ -339,16 +360,17 @@ mod linux_impl {
         };
 
         // 2. Build async-signal-safe ChildLaunchPlan in parent BEFORE `clone3`.
-        let (plan, idmapped_mounts) = match build_launch_plan(&spec) {
-            Ok(p) => p,
-            Err(e) => {
-                drop(cgroup_dirfd);
-                if let Some(cg) = &world_cgroup {
-                    let _ = fs::remove_dir(cg);
+        let (plan, idmapped_mounts, exec_cgroup_fds) =
+            match build_launch_plan(&spec, world_cgroup.as_deref()) {
+                Ok(p) => p,
+                Err(e) => {
+                    drop(cgroup_dirfd);
+                    if let Some(cg) = &world_cgroup {
+                        remove_world_cgroup(cg);
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
+            };
 
         // 3. Create CLOEXEC control socketpair + parent->child sync pipe + child->parent error pipe.
         let (host_sock, guest_sock) = linux_sys::create_cloexec_socketpair()?;
@@ -367,7 +389,7 @@ mod linux_impl {
             Err(e) => {
                 drop(cgroup_dirfd);
                 if let Some(cg) = &world_cgroup {
-                    let _ = fs::remove_dir(cg);
+                    remove_world_cgroup(cg);
                 }
                 return Err(SandboxError::spawn("clone3", e));
             }
@@ -378,6 +400,7 @@ mod linux_impl {
         drop(sync_rd);
         drop(err_wr);
         drop(cgroup_dirfd);
+        drop(exec_cgroup_fds);
 
         let cleanup_on_error = |cg: Option<&PathBuf>| {
             let _ = teardown_world_resources(child_pid, cg.map(|p| p.as_path()));
@@ -615,11 +638,28 @@ mod linux_impl {
         Ok(())
     }
 
-    /// Returns the plan plus the detached mounts its fds refer to; the caller must keep the
-    /// latter open until `clone3` has returned and the mounts have been idmapped.
+    /// Returns the plan plus the fds it refers to by number: detached mounts (to be kept open
+    /// until they have been idmapped) and exec cgroup files (until `clone3` has returned).
     fn build_launch_plan(
         spec: &SpawnWorldSpec,
-    ) -> Result<(ChildLaunchPlan, Vec<OwnedFd>), SandboxError> {
+        world_cgroup: Option<&Path>,
+    ) -> Result<(ChildLaunchPlan, Vec<OwnedFd>, Vec<OwnedFd>), SandboxError> {
+        let mut exec_cgroup_fds = Vec::new();
+        if let Some(cg) = world_cgroup {
+            // Opened with host credentials, which is what the kernel checks on migration.
+            for (file, read) in [("cgroup.procs", true), ("cgroup.kill", false)] {
+                let path = cg.join(EXEC_CGROUP).join(file);
+                let fd = OpenOptions::new()
+                    .read(read)
+                    .write(true)
+                    .open(&path)
+                    .and_then(|f| linux_sys::dup_above_control_fd(f.as_raw_fd()))
+                    .map_err(|e| SandboxError::cgroup(&path, e))?;
+                exec_cgroup_fds.push(fd);
+            }
+        }
+        let inherit_fds: Vec<RawFd> = exec_cgroup_fds.iter().map(|f| f.as_raw_fd()).collect();
+
         // Verify no symlinks at mount targets inside untrusted rootfs (P0-2).
         for rel in ["proc", "tmp", "dev", "dev/shm"] {
             reject_symlinks_along(&spec.rootfs_dir, Path::new(rel))?;
@@ -698,6 +738,13 @@ mod linux_impl {
             CString::new(GUEST_CONTROL_FD.to_string())
                 .map_err(|e| SandboxError::InvalidConfig(e.to_string()))?,
         );
+        if let [procs, kill] = inherit_fds[..] {
+            for arg in ["--exec-cgroup-fds".to_owned(), format!("{procs},{kill}")] {
+                argv_storage.push(
+                    CString::new(arg).map_err(|e| SandboxError::InvalidConfig(e.to_string()))?,
+                );
+            }
+        }
         for extra in &spec.extra_guest_args {
             argv_storage.push(
                 CString::new(extra.as_str())
@@ -731,6 +778,7 @@ mod linux_impl {
             dev_binds,
             agent_bind,
             hostname: spec.effective_hostname().into_bytes(),
+            inherit_fds,
             exec_path,
             argv_storage,
             argv_ptrs,
@@ -738,7 +786,7 @@ mod linux_impl {
             envp_ptrs,
             seccomp_filter,
         };
-        Ok((plan, idmapped_mounts))
+        Ok((plan, idmapped_mounts, exec_cgroup_fds))
     }
 
     fn configure_userns_maps(
@@ -766,6 +814,36 @@ mod linux_impl {
             .map_err(|e| SandboxError::spawn("write_gid_map", e))?;
 
         Ok(())
+    }
+
+    /// Kill every process in the exec cgroup and wait until it is empty; returns whether any
+    /// were left.
+    fn kill_exec_cgroup(exec_cg: &Path) -> Result<bool, SandboxError> {
+        let ctrl = CgroupV2Controller::new(exec_cg);
+        let populated = || {
+            ctrl.read_events()
+                .map(|ev| ev.populated)
+                .map_err(|e| SandboxError::cgroup(exec_cg, e))
+        };
+        if !populated()? {
+            return Ok(false);
+        }
+        ctrl.trigger_cgroup_kill(exec_cg)
+            .map_err(|e| SandboxError::cgroup(exec_cg, e))?;
+        let deadline = Instant::now() + EXEC_KILL_TIMEOUT;
+        while populated()? {
+            if Instant::now() >= deadline {
+                return Err(SandboxError::cgroup(exec_cg, "still populated after cgroup.kill"));
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        Ok(true)
+    }
+
+    /// Best-effort removal of a world cgroup that never received a task.
+    fn remove_world_cgroup(world_cg: &Path) {
+        let _ = fs::remove_dir(world_cg.join(EXEC_CGROUP));
+        let _ = fs::remove_dir(world_cg);
     }
 
     /// Deterministically kill the entire world process tree (`cgroup.kill` + fallback
@@ -808,6 +886,7 @@ mod linux_impl {
         if let Some(cg) = world_cgroup {
             let deadline = Instant::now() + Duration::from_millis(500);
             loop {
+                let _ = fs::remove_dir(cg.join(EXEC_CGROUP));
                 match fs::remove_dir(cg) {
                     Ok(()) => break,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => break,

@@ -17,6 +17,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut socketpair_fd: Option<i32> = None;
     let mut workload_cgroup = PathBuf::from(DEFAULT_WORKLOAD_CGROUP);
     let mut no_cgroup = false;
+    let mut exec_cgroup_fds: Option<(i32, i32)> = None;
     let mut pid1_mode = std::process::id() == 1;
 
     let mut args = std::env::args().skip(1);
@@ -43,12 +44,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--no-cgroup" => {
                 no_cgroup = true;
             }
+            "--exec-cgroup-fds" => {
+                let val = args
+                    .next()
+                    .ok_or("missing value for --exec-cgroup-fds")?;
+                let (procs, kill) = val
+                    .split_once(',')
+                    .ok_or("--exec-cgroup-fds expects PROCS_FD,KILL_FD")?;
+                exec_cgroup_fds = Some((procs.parse()?, kill.parse()?));
+            }
             "--pid1" => {
                 pid1_mode = true;
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "aos-guest [--vsock-port PORT | --socketpair-fd FD] [--workload-cgroup PATH] [--no-cgroup] [--pid1]"
+                    "aos-guest [--vsock-port PORT | --socketpair-fd FD] [--workload-cgroup PATH] [--no-cgroup] [--exec-cgroup-fds PROCS_FD,KILL_FD] [--pid1]"
                 );
                 return Ok(());
             }
@@ -73,8 +83,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             })?;
     }
 
-    let backend = LinuxGuestBackend::new(workload_cgroup, !no_cgroup);
-    if !no_cgroup {
+    let backend = match exec_cgroup_fds {
+        Some((procs, kill)) => LinuxGuestBackend::with_inherited_exec_cgroup(procs, kill)?,
+        None => LinuxGuestBackend::new(workload_cgroup, !no_cgroup),
+    };
+    if !no_cgroup && exec_cgroup_fds.is_none() {
         let _ = backend.cgroup().ensure_root();
     }
 

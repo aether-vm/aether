@@ -184,6 +184,7 @@ impl Drop for E2eHarness {
                             let _ = fs::write(sp.join("cgroup.kill"), b"1\n");
                             let _ = fs::write(sp.join("cgroup.freeze"), b"0\n");
                             let _ = fs::write(sp.join("cgroup.kill"), b"1\n");
+                            let _ = fs::remove_dir(sp.join("exec"));
                             let _ = fs::remove_dir(&sp);
                         }
                     }
@@ -560,7 +561,7 @@ fn live_linux_btrfs_namespace_agentd_and_aos_cli_cold_fork_e2e() {
     assert!(!world_cg.exists(), "world cgroup must be removed on destroy");
     assert!(!world_subvol.exists(), "writable Btrfs world subvol must be destroyed");
 
-    // 10. Crash/restart recovery test: spawn w2 with a background daemon, kill agentd, restart!
+    // 10. Crash/restart recovery test: kill agentd during an in-flight Exec in w2, restart!
     let (ok, cw2_out, _) = run_aos(
         &aos_bin,
         &h.sock_path,
@@ -570,23 +571,39 @@ fn live_linux_btrfs_namespace_agentd_and_aos_cli_cold_fork_e2e() {
     let cw2_json: serde_json::Value = serde_json::from_str(&cw2_out).unwrap();
     let wid2 = cw2_json["world_id"].as_str().unwrap().to_owned();
     let fence2 = cw2_json["fencing_token"].as_u64().unwrap().to_string();
-    let (ok, d_out, d_err) = run_aos(
-        &aos_bin,
-        &h.sock_path,
-        &[
-            "world",
-            "exec",
-            &wid2,
-            "--fence",
-            &fence2,
-            "--",
-            "/usr/bin/seccomp-probe",
-            "--spawn-daemon",
-        ],
-    );
-    assert!(ok && d_out.contains("DAEMON_SPAWNED"), "spawn daemon failed: {d_err}");
-
     let w2_cg = h.cgroup_root.join("epoch-1").join(format!("w-{wid2}"));
+    let mut inflight = Command::new(&aos_bin)
+        .arg("--socket")
+        .arg(&h.sock_path)
+        .args(["--owner", "e2e"])
+        .args(["world", "exec", &wid2, "--fence", &fence2, "--"])
+        .args(["/bin/sh", "-c", "/usr/bin/seccomp-probe --spawn-daemon; sleep 300"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn in-flight aos world exec");
+    // Wait until both the shell (busybox runs `sleep` in-process) and the daemon are running.
+    let is_probe = |pid: &str| {
+        fs::read_to_string(Path::new("/proc").join(pid).join("cmdline"))
+            .is_ok_and(|c| c.starts_with("/usr/bin/seccomp-probe"))
+    };
+    let mut w2_pids: Vec<String> = Vec::new();
+    for _ in 0..100 {
+        w2_pids = fs::read_to_string(w2_cg.join("exec/cgroup.procs"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        if w2_pids.len() == 2 && w2_pids.iter().any(|pid| is_probe(pid)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        w2_pids.len() == 2 && w2_pids.iter().any(|pid| is_probe(pid)),
+        "in-flight exec must hold its shell and the daemon: {w2_pids:?}"
+    );
+
     let w2_subvol = h.pool_dir.join("worlds").join(format!("w-{wid2}"));
     assert!(w2_cg.exists());
     assert!(w2_subvol.exists());
@@ -596,6 +613,13 @@ fn live_linux_btrfs_namespace_agentd_and_aos_cli_cold_fork_e2e() {
 
     // R2 must have killed & removed epoch-1 cgroups and reclaimed pool/worlds/w-<wid2>!
     assert!(!w2_cg.exists(), "R2 must kill and remove stale epoch-1 world cgroup");
+    for pid in &w2_pids {
+        assert!(
+            !Path::new("/proc").join(pid).exists(),
+            "in-flight exec pid {pid} survived R2"
+        );
+    }
+    let _ = inflight.wait();
     assert!(!w2_subvol.exists(), "R2 must reclaim stale writable world subvolume");
 
     // Exec with idempotency key on lost w2 must return explicit ERROR_CODE_OUTCOME_UNKNOWN!

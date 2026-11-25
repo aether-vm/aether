@@ -314,8 +314,8 @@ fn live_linux_namespace_driver_hardening_and_cgroup_kill() {
         .expect("exec check-shm");
     assert_eq!(shm_reply.exit_code, Some(0), "/dev/shm tmpfs must be mounted");
 
-    // 5. Spawn a real double-forked daemon (closing all fds 0..64) inside the sandbox,
-    //    then test live host-side `freeze_and_sync` (P0-1) + `AgentFrozen` rejection,
+    // 5. Spawn a real double-forked daemon (closing all fds 0..64) inside the sandbox and verify
+    //    it does not outlive its foreground Exec (§7.1), then test live host-side `freeze_and_sync` (P0-1) + `AgentFrozen` rejection,
     //    then `destroy()` and verify `cgroup.kill` kills the frozen world cleanly!
     let bg_reply = world
         .exec(ExecRequest::new(
@@ -324,19 +324,17 @@ fn live_linux_namespace_driver_hardening_and_cgroup_kill() {
         ))
         .expect("exec spawn-daemon");
     assert_eq!(bg_reply.exit_code, Some(0));
-    std::thread::sleep(Duration::from_millis(50));
-
-    // Confirm at least 2 processes live in the world cgroup (aos-guest + double-forked daemon).
-    let before_pids: Vec<String> = fs::read_to_string(world_cg.join("cgroup.procs"))
-        .expect("read cgroup.procs before freeze")
-        .lines()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .collect();
-    assert!(
-        before_pids.len() >= 2,
-        "expected aos-guest + double-forked daemon in world cgroup, got {before_pids:?}"
+    let exec_cg = world_cg.join("exec");
+    assert_eq!(
+        fs::read_to_string(exec_cg.join("cgroup.procs")).expect("read exec cgroup.procs"),
+        "",
+        "double-forked daemon must not outlive its Exec"
     );
+
+    // Put a straggler into the exec cgroup from the host: freeze and destroy must cover it too.
+    let mut straggler = Command::new("sleep").arg("300").spawn().expect("sleep");
+    fs::write(exec_cg.join("cgroup.procs"), straggler.id().to_string())
+        .expect("move straggler into exec cgroup");
 
     // Unfreeze before freeze MUST be rejected with InvalidStateTransition.
     let pre_unfreeze_err = world.unfreeze(Duration::from_secs(5)).unwrap_err();
@@ -406,7 +404,14 @@ fn live_linux_namespace_driver_hardening_and_cgroup_kill() {
         "AFTER_UNFREEZE_OK"
     );
 
-    // Re-freeze and verify destroy() cleanly kills & removes a frozen world with lingering daemon!
+    // The Exec above cleared the exec cgroup, straggler included; add another one.
+    let first = straggler.wait().expect("wait first straggler");
+    assert!(!first.success());
+    let mut straggler = Command::new("sleep").arg("300").spawn().expect("sleep");
+    fs::write(exec_cg.join("cgroup.procs"), straggler.id().to_string())
+        .expect("move straggler into exec cgroup");
+
+    // Re-freeze and verify destroy() cleanly kills & removes a frozen world with a straggler!
     let freeze2 = world
         .freeze_and_sync(FreezeOptions::disk_clean())
         .expect("second freeze_and_sync must succeed");
@@ -420,13 +425,19 @@ fn live_linux_namespace_driver_hardening_and_cgroup_kill() {
         world_cg
     );
 
-    // Verify EVERY previously observed host PID in that cgroup is completely gone.
-    for pid in &before_pids {
-        assert!(
-            !PathBuf::from(format!("/proc/{pid}")).exists(),
-            "leaked descendant pid {pid} survived cgroup.kill!"
-        );
-    }
+    // Verify aos-guest and the straggler were both killed.
+    assert!(
+        !PathBuf::from(format!("/proc/{host_pid}")).exists(),
+        "aos-guest pid {host_pid} survived cgroup.kill!"
+    );
+    let straggler_status = straggler
+        .try_wait()
+        .expect("wait straggler")
+        .expect("straggler survived cgroup.kill!");
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&straggler_status),
+        Some(9)
+    );
 
     // 6. Verify P0-2 symlink rejection in untrusted rootfs before pivot_root!
     let bad_rootfs = work.join("symlink-rootfs");

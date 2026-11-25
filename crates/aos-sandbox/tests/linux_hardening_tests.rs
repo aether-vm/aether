@@ -9,7 +9,7 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aos_sandbox::{
     DEFAULT_CGROUP_SLICE_ROOT, ExecReply, ExecRequest, GuestAgentSource, IdMapRange, NamespaceDriver, ResourceLimits,
@@ -254,12 +254,16 @@ fn default_pids_limit_contains_a_fork_bomb() {
         "bomb",
         "i=0; while [ $i -lt 700 ]; do setsid sleep 60 >/dev/null 2>&1 & i=$((i+1)); done; true",
     );
-    let tasks = fs::read_to_string(cg.join("cgroup.procs"))
+    // The bomb itself is gone once its Exec ended, so look at what the kernel recorded.
+    let peak: u64 = fs::read_to_string(cg.join("pids.peak"))
         .unwrap()
-        .lines()
-        .count();
-    assert!(tasks > 100, "fork bomb did not run, got {tasks} processes");
-    assert!(tasks <= 512, "fork bomb created {tasks} processes");
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(peak > 100, "fork bomb did not run, peak {peak}");
+    assert!(peak <= 512, "fork bomb reached {peak} tasks");
+    let events = fs::read_to_string(cg.join("pids.events")).unwrap();
+    assert!(!events.contains("max 0"), "pids.max was never hit: {events}");
     assert_eq!(world.ping(7).expect("world survives").nonce, 7);
     world.destroy().unwrap();
 }
@@ -317,5 +321,115 @@ fn none_limits_stay_unlimited() {
         let v = fs::read_to_string(cg.join(file)).unwrap_or_else(|_| "max".to_owned());
         assert_eq!(v.trim(), "max", "{file}");
     }
+    world.destroy().unwrap();
+}
+
+fn exec_with_timeout(
+    world: &mut WorldHandle,
+    id: &str,
+    script: &str,
+    timeout: Duration,
+) -> ExecReply {
+    let mut req = ExecRequest::new(id, vec!["/bin/sh".into(), "-c".into(), script.into()]);
+    req.timeout = Some(timeout);
+    world
+        .exec(req)
+        .unwrap_or_else(|e| panic!("exec {id} failed: {e}"))
+}
+
+/// Host pids of every task in the world cgroup subtree.
+fn world_pids(world: &WorldHandle) -> Vec<u32> {
+    let cg = world.info().cgroup_path.clone().unwrap();
+    let mut pids = Vec::new();
+    for dir in [cg.clone(), cg.join("exec")] {
+        let raw = fs::read_to_string(dir.join("cgroup.procs")).unwrap_or_default();
+        pids.extend(raw.lines().map(|l| l.trim().parse::<u32>().unwrap()));
+    }
+    pids
+}
+
+#[test]
+fn exec_timeout_kills_background_descendants_and_keeps_the_world_usable() {
+    let Some(scratch) = Scratch::new("exec-timeout") else {
+        return;
+    };
+    let mut world = NamespaceDriver::new().spawn_world(scratch.spec()).unwrap();
+    let agent = world.info().host_pid.unwrap();
+    for (id, script) in [
+        ("direct", "sleep 30"),
+        ("grandchild", "sleep 30 & wait"),
+        ("setsid", "setsid sleep 30 & wait"),
+    ] {
+        let start = Instant::now();
+        let r = exec_with_timeout(&mut world, id, script, Duration::from_millis(500));
+        assert!(r.timed_out, "{id}: {r:?}");
+        assert!(r.cgroup_killed, "{id}: {r:?}");
+        assert!(start.elapsed() < Duration::from_secs(2), "{id} hung");
+        assert_eq!(world_pids(&world), vec![agent], "{id} left processes behind");
+        assert_eq!(world.ping(3).expect("world stays usable").nonce, 3);
+    }
+    world.destroy().unwrap();
+}
+
+#[test]
+fn foreground_exec_returns_and_leaves_no_processes_behind() {
+    let Some(scratch) = Scratch::new("exec-end") else {
+        return;
+    };
+    let mut world = NamespaceDriver::new().spawn_world(scratch.spec()).unwrap();
+    let agent = world.info().host_pid.unwrap();
+    for (id, script, leftovers) in [
+        ("clean", "echo hi", false),
+        ("pipe-holder", "sleep 30 & echo hi", true),
+        (
+            "daemon",
+            "setsid sleep 30 </dev/null >/dev/null 2>&1 & echo hi",
+            true,
+        ),
+        // Re-running right after a kill must not be hit by the previous exec's kill.
+        ("again", "echo hi", false),
+    ] {
+        let start = Instant::now();
+        let r = exec_with_timeout(&mut world, id, script, Duration::from_secs(10));
+        assert_eq!(r.exit_code, Some(0), "{id}: {r:?}");
+        assert!(!r.timed_out, "{id}: {r:?}");
+        assert_eq!(stdout(&r), "hi", "{id}");
+        assert!(start.elapsed() < Duration::from_secs(3), "{id} hung");
+        // The daemon may not have left the fork yet, so only its absence afterwards is certain.
+        if !leftovers {
+            assert!(!r.cgroup_killed, "{id}: {r:?}");
+        }
+        assert_eq!(world_pids(&world), vec![agent], "{id} left processes behind");
+    }
+    world.destroy().unwrap();
+}
+
+#[test]
+fn workload_cannot_reach_the_exec_cgroup_controls() {
+    let Some(scratch) = Scratch::new("exec-fd") else {
+        return;
+    };
+    let mut world = NamespaceDriver::new().spawn_world(scratch.spec()).unwrap();
+    // Neither inherited fds nor reopening aos-guest's fds may move the workload out of `exec`.
+    let r = exec_with_timeout(
+        &mut world,
+        "escape",
+        "ls /proc/self/fd; for f in /proc/1/fd/*; do echo 0 > $f && echo WROTE $f; done 2>/dev/null; \
+         cat /proc/self/cgroup",
+        Duration::from_secs(5),
+    );
+    let out = stdout(&r);
+    assert!(
+        out.lines().any(|l| l.starts_with("0::") && l.ends_with("/exec")),
+        "workload must run in and stay inside the exec cgroup:\n{out}"
+    );
+    for line in out.lines().filter(|l| l.starts_with("WROTE")) {
+        let fd: u32 = line.rsplit('/').next().unwrap().parse().unwrap();
+        assert!(fd < 10, "workload reopened a cgroup control fd: {out}");
+    }
+    assert!(
+        !out.lines().any(|l| l.parse::<u32>().is_ok_and(|fd| fd >= 10)),
+        "cgroup control fds leaked into the workload:\n{out}"
+    );
     world.destroy().unwrap();
 }
