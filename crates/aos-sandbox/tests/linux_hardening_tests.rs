@@ -455,3 +455,44 @@ fn workload_cannot_inspect_or_modify_aos_guest() {
     assert_eq!(own.exit_code, Some(0));
     world.destroy().unwrap();
 }
+
+#[test]
+fn spawn_world_does_not_deadlock_while_other_threads_start() {
+    let Some(scratch) = Scratch::new("spawn-race") else {
+        return;
+    };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stuck = std::thread::scope(|scope| {
+        // glibc's set*id wrappers wait for threads that are just starting; after `clone3` those
+        // threads do not exist in the child.
+        for _ in 0..4 {
+            scope.spawn(|| {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::thread::spawn(|| {}).join();
+                }
+            });
+        }
+        scope.spawn(|| {
+            for i in 0..150 {
+                let spawned = NamespaceDriver::new().spawn_world(scratch.spec());
+                let _ = tx.send(i);
+                // A world killed by the watchdog below ends the loop.
+                let Ok(mut world) = spawned else { break };
+                world.destroy().unwrap();
+            }
+        });
+        let mut stuck = None;
+        for i in 0..150 {
+            if rx.recv_timeout(Duration::from_secs(10)).is_err() {
+                stuck = Some(i);
+                // Release the blocked spawn so the scope can end.
+                let _ = fs::write(scratch.cgroup_root.join("epoch-98/cgroup.kill"), "1");
+                break;
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        stuck
+    });
+    assert_eq!(stuck, None, "spawn_world deadlocked");
+}

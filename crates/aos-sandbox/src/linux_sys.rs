@@ -591,15 +591,17 @@ unsafe fn run_child_setup(
             }
         }
 
-        // 2. Enter UID 0 / GID 0 inside the new user namespace.
-        if plan.drop_groups && libc::setgroups(0, ptr::null()) != 0 {
+        // 2. Enter UID 0 / GID 0 inside the new user namespace. Raw syscalls: the glibc wrappers
+        //    synchronize all threads of the process and would wait forever for threads that
+        //    exist only in the parent.
+        if plan.drop_groups && libc::syscall(libc::SYS_setgroups, 0, ptr::null::<libc::gid_t>()) != 0 {
             fail_child(err_wr_fd, ChildStage::SetGroups, raw_errno());
         }
         if plan.enable_userns {
-            if libc::setresgid(0, 0, 0) != 0 {
+            if libc::syscall(libc::SYS_setresgid, 0, 0, 0) != 0 {
                 fail_child(err_wr_fd, ChildStage::SetResGid, raw_errno());
             }
-            if libc::setresuid(0, 0, 0) != 0 {
+            if libc::syscall(libc::SYS_setresuid, 0, 0, 0) != 0 {
                 fail_child(err_wr_fd, ChildStage::SetResUid, raw_errno());
             }
         }
