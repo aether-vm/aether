@@ -17,7 +17,8 @@ git clone git@github.com:forkloom-vm/forkloom.git forkloom
 ```bash
 sudo apt-get update && sudo apt-get install -y \
   btrfs-progs xfsprogs e2fsprogs protobuf-compiler clang pkg-config \
-  libssl-dev iproute2 nftables conntrack jq unzip musl-tools curl build-essential
+  libssl-dev iproute2 nftables conntrack jq unzip musl-tools curl build-essential \
+  busybox-static python3-venv
 sudo modprobe btrfs
 sudo usermod -aG kvm,disk $USER
 # 安装 Rust 稳定版与 musl 静态目标
@@ -26,13 +27,46 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --defaul
 # 安装官方 Firecracker & Jailer (v1.10.1+) 至 /usr/local/bin/
 ```
 
-### 3. 验证全仓编译与单测全绿
+### 3. 构建 `aos-guest` 并准备实机测试 rootfs（root 执行）
+实机测试读取仓库外的 `/var/lib/forkloom/guest-image/`，**缺失时会打印 `skipping` 并计为通过**；切换到改动了 `aos-guest` 的提交后，须重新执行末尾的构建与复制。
 ```bash
 cd ~/work/forkloom-vm/forkloom
-cargo test --workspace
+G=/var/lib/forkloom/guest-image; R=$G/rootfs-stage
+mkdir -p $G/out $R/{bin,dev,etc,lib,lib64,proc,root,run,sbin,sys,tmp,usr/bin,usr/sbin,var/tmp}
+chmod 1777 $R/tmp
+cp "$(command -v busybox)" $R/bin/busybox
+for app in $($R/bin/busybox --list); do [ "$app" = busybox ] || ln -sf busybox "$R/bin/$app"; done
+cp -L "$(command -v ip)" "$(command -v ss)" $R/usr/bin/
+for lib in $(ldd "$(command -v ip)" "$(command -v ss)" | grep -oE '/[^ ]+\.so[^ ]*' | sort -u); do
+  case "$lib" in */ld-linux*) d=$R/lib64 ;; *) d=$R/lib/x86_64-linux-gnu ;; esac
+  mkdir -p $d && cp -L "$lib" $d/
+done
+ln -sfn /sbin/init $R/usr/bin/aos-guest
+echo 'root:x:0:0:root:/root:/bin/sh' > $R/etc/passwd
+echo 'root:x:0:' > $R/etc/group
+echo forkloom-guest > $R/etc/hostname
+printf '127.0.0.1 localhost\n::1 localhost\n' > $R/etc/hosts
+cargo build -p aos-guest --locked --release --target x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/release/aos-guest $G/out/aos-guest
+cp target/x86_64-unknown-linux-musl/release/aos-guest $R/sbin/init
 ```
 
-### 4. 在新电脑上无缝唤醒分级特战队（IDE 无关）
+### 4. 验证全仓编译与测试全绿（root 执行）
+```bash
+cd ~/work/forkloom-vm/forkloom
+cargo test --workspace --locked --no-fail-fast 2>&1 | tee /tmp/forkloom-test.log
+grep -c skipping /tmp/forkloom-test.log   # 必须为 0
+cargo test -p aos-store --test linux_btrfs_live --locked -- --ignored
+# Python SDK；桩代码由 grpcio-tools 1.85.3 生成，其他版本会使 --check 失败
+python3 -m venv ~/work/forkloom-vm/venv
+~/work/forkloom-vm/venv/bin/pip install grpcio-tools==1.85.3 'grpcio>=1.85.3' 'protobuf>=7.35.1,<8' pytest
+(cd sdk/python && ~/work/forkloom-vm/venv/bin/python scripts/gen_proto.py --check)
+(cd sdk/python && FORKLOOM_LIVE_E2E=1 ~/work/forkloom-vm/venv/bin/python -m pytest -q)
+# TypeScript SDK；需要 Linux 版 Node >= 20（WSL 下注意不要误用 Windows 的 npm）
+(cd sdk/typescript && npm install --no-package-lock && FORKLOOM_LIVE_E2E=1 npm test)
+```
+
+### 5. 在新电脑上无缝唤醒分级特战队（IDE 无关）
 在原生 Linux / WSL2 环境直接打开 `~/work/forkloom-vm/forkloom`（支持 Antigravity Swarm / Antigravity IDE / Cursor / VS Code 等任意客户端）。根目录的 `AGENTS.md` 会自动注入五条工程红线与 7 角色异构分级编队（`fsck` [`gemini-4-carbon-high`] / `Forge` / `Arch-Zero` / `Mach` / `SDK` / `Scout` / `monitor`；专项短期工位 `store` 与 `gw` 已完成 Phase 1 历史使命并按纪律退役）。直接对主控会话说：
 > **“请阅读 `AGENTS.md` 和 `docs/HANDOFF.md`，按 `Arch-Zero` 总控身份接手项目，基于 `v0.1.0` 冷分叉封版基线启动 Phase 2（Firecracker 热分叉引擎 `v0.5`）。”**
 
