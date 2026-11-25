@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use aos_gw::{
     AuditStore, BindingKey, CapabilityPolicy, EpochFenceRegistry, GwError, SlotBinding, SlotId,
@@ -16,7 +17,7 @@ use aos_gw::{
 use aos_meta::{
     CommitFrameRequest, CommitProofBundle, CreateWorldRequest as MetaCreateWorldRequest,
     DeleteOutcome, FencingToken as MetaFencingToken, FrameDurability as MetaDurability,
-    FrameRecord, FrameState, Hold, IdempotencyKey as MetaIdempotencyKey, Labels, ManagedObject,
+    FrameRecord, FrameState, GcReport, Hold, IdempotencyKey as MetaIdempotencyKey, Labels, ManagedObject,
     MetaEngine, ObjectKind, PinSpec as MetaPinSpec, PrepareFrameRequest, TimelineTarget,
     WorldFence, WorldRecord, WorldState,
 };
@@ -60,6 +61,9 @@ pub const DEFAULT_EXEC_TIMEOUT_MS: u64 = 60 * 1000;
 pub const MAX_EXEC_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 /// How long starting a detached command may take.
 const DETACHED_START_TIMEOUT_MS: u64 = 10 * 1000;
+/// Physical deletions per `meta` lock hold during garbage collection.
+const GC_BATCH: usize = 4;
+const GC_BATCH_PAUSE: Duration = Duration::from_millis(5);
 /// Default `Exec` max retained bytes per stream (64 KiB).
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
@@ -264,6 +268,30 @@ impl AgentdService {
             self.teardown_world(*wid);
         }
         Ok(expired)
+    }
+
+    /// Run one garbage-collection pass, releasing `meta` between batches of physical deletions.
+    pub fn collect_garbage(&self) -> Result<GcReport, aos_meta::MetaError> {
+        let mut total = GcReport::default();
+        loop {
+            let r = self
+                .inner
+                .meta
+                .lock()
+                .unwrap()
+                .collect_garbage_batch(GC_BATCH)?;
+            total.pins_expired += r.pins_expired;
+            total.frames_deleted += r.frames_deleted;
+            total.quarantine_purged += r.quarantine_purged;
+            total.tombstones_purged += r.tombstones_purged;
+            total.idempotency_purged += r.idempotency_purged;
+            total.failures = r.failures;
+            if !r.more {
+                return Ok(total);
+            }
+            // The mutex is not fair: give waiting requests a chance to take it.
+            std::thread::sleep(GC_BATCH_PAUSE);
+        }
     }
 
     /// Release everything a world that already ended in `meta` still occupies.
@@ -1282,11 +1310,22 @@ impl FrameService for AgentdService {
             (base_id, dir.join(base_subvol.name()), dir.join(target_subvol.name()))
         };
 
-        let bundle = self
-            .inner
-            .tree
-            .export_patch(&base_path, &target_path)
-            .map_err(Status::from)?;
+        let bundle = self.inner.tree.export_patch(&base_path, &target_path);
+        // The trees were read without a hold. Deletion is recorded before it starts, so if both
+        // frames are still committed neither was touched while the diff was computed.
+        {
+            let meta = self.inner.meta.lock().unwrap();
+            for id in [base_id, target_id] {
+                let intact = meta
+                    .frame(id)
+                    .map_err(map_meta_error)?
+                    .is_some_and(|f| matches!(f.state, FrameState::Committed { .. }));
+                if !intact {
+                    return Err(map_meta_error(aos_meta::MetaError::FrameNotFound(id)));
+                }
+            }
+        }
+        let bundle = bundle.map_err(Status::from)?;
         let entries = bundle
             .entries
             .into_iter()

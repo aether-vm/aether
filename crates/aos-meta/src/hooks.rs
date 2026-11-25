@@ -10,8 +10,8 @@ use crate::model::ManagedObject;
 /// Physical side effects the metadata engine needs but does not own.
 ///
 /// `NotFound` from any `destroy_*` / `purge_*` method is treated as success (deletion is
-/// idempotent across crashes); any other error aborts the current step and leaves the
-/// metadata in a state from which the step is retried.
+/// idempotent across crashes); any other error aborts the current step (garbage collection:
+/// skips the object) and leaves the metadata in a state from which the step is retried.
 pub trait RecoveryHooks: Send {
     /// R2: tell `aos-gw` to revoke every `(slot, world, epoch)` binding older than `epoch`.
     /// Must not return `Ok` before the gateway has acknowledged.

@@ -130,7 +130,7 @@ pub struct Ephemeral<T> { inner: T, boot_id: u128 }
    - **网关纪元围栏**：首先连接 `aos-gw` 下发新 `daemon_epoch`，强制 `aos-gw` 立即作废所有 `< current_epoch` 的 `(slot, world, epoch)` 凭证绑定并清空对应连接状态，收到确认后方继续；
    - **进程树全歼**：所有沙箱与 `jailer` 子进程在创建时均通过 `clone3(CLONE_INTO_CGROUP)` 直接放入 `/sys/fs/cgroup/forkloom.slice/epoch-<e>/w-<id>`，恢复时对旧纪元 cgroup 写入 `cgroup.kill` 确保零漏网进程；回收网络槽位并执行 `conntrack -D` 清空残留连接跟踪表；将旧纪元活动 `World` 置为 `Lost`。
 4. **R3~R5 确定性清理**：回滚全部 `Preparing` 帧，续完所有 `Deleting` 帧的物理删除。
-5. **R6 带隔离区与熔断阈值的孤儿回收（A5）**：扫描 `objects/` 中不在活跃集合内的受管命名对象——**若孤儿对象数量超过安全阈值（如 > 50 个或占池总对象 > 10%），立即中止自动清理并拒绝启动，提示人工核查是否误恢复了旧版 `redb` 备份**；阈值内的少量崩溃孤儿先 `rename` 移入 `pool/quarantine/<epoch>/` 保留宽限期（如 24 小时）后再异步物理销毁。
+5. **R6 带隔离区与熔断阈值的孤儿回收（A5）**：扫描 `objects/` 中不在活跃集合内的受管命名对象——**若孤儿对象数量超过安全阈值（如 > 50 个或占池总对象 > 10%），立即中止自动清理并拒绝启动，提示人工核查是否误恢复了旧版 `redb` 备份**；阈值内的少量崩溃孤儿先 `rename` 移入 `pool/quarantine/<epoch>/` 保留宽限期（如 24 小时）后，由 `agentd` 周期 GC 物理销毁；只读子卷隔离后仍保持只读。
 
 ---
 
@@ -175,13 +175,14 @@ pub struct Ephemeral<T> { inner: T, boot_id: u128 }
 
 2. **分层幂等与崩溃显式未知契约**
    - **元数据操作**（导入、创建、提交帧、销毁）在 `redb` 单写者事务内原子记录 `RequestId`，为**真幂等**。
-   - `CreateWorld` 的重放返回原 World 的**当前**记录（`agentd` 重启后为 `Lost`）；沙箱启动失败时在同一事务内终结 World 并忘记该 `RequestId`，允许重试。
+   - `CreateWorld` 的重放返回原 World 的**当前**记录（`agentd` 重启后为 `Lost`）；沙箱启动失败时在同一事务内终结 World 并忘记该 `RequestId`，允许重试。`RequestId` 记录保留 24 小时；World 仍在运行时不清除。
    - **可写沙箱 `Exec`** 仅提供 **World 存活期内**的 `RequestId` 结果缓存与去重。
    - 跨 `agentd` 崩溃重启，对未决或历史 `Exec` **一律返回显式 `WorldLost` / `OutcomeUnknown`，严禁猜测性自动重放**；是否对账或从 `Durable Frame` 重建由客户端决定。
 
 3. **租约分层存储、停机顺延与围栏令牌（Fencing Token）**
    - **`World` 租约纯驻内存**，使用单调时钟，与磁盘 `fsync` 尾延迟解耦。到期的 World 由 `agentd` 周期回收；有进行中的 `CreateWorld` / `Exec` / `Checkpoint` 时推迟到其结束，`detached` 进程不构成推迟理由。前台 `Exec` 超时上限 1 小时，因此推迟至多 1 小时。
    - **`Durable Frame` 的 `Pin` 租约**内存续约、低频落盘；`agentd` 启动恢复时，将存活 `Pin` 租约统一重置为 `now + lease_ttl`，防止停机维护期间墙钟流逝导致重启后误删保留帧。
+   - `agentd` 周期 GC 只物理删除**已请求删除且无 `Hold`** 的帧；`Pin` 到期本身不删除帧。单个对象删除失败不影响其余对象，下一轮重试。
    - 标签创建后**不可变**；销毁的 `World` 留**短时墓碑**可查；批量选择器禁止空选择并记录调用主体。
    - 客户端接管所有权时获得单调递增的 **`fencing_token`**，后续变更类调用须携带，低于当前令牌的请求返回 `FencedOut`，防止分区后“诈尸”实例双写。
 

@@ -3,7 +3,7 @@
 mod common;
 
 use aos_meta::{
-    CreateWorldRequest, FencingToken, FrameDurability, Hold, IdempotencyKey, MetaEngine,
+    Clock, CreateWorldRequest, FencingToken, FrameDurability, Hold, IdempotencyKey, MetaEngine,
     MetaError, ObjectKind, PinSpec, PrepareFrameRequest, WorldEndReason, WorldFence, WorldState,
 };
 use aos_types::FrameId;
@@ -376,4 +376,24 @@ impl ClockInstant for Harness {
     fn clock_instant(&self) -> std::time::Instant {
         aos_meta::Clock::now_instant(&*self.clock)
     }
+}
+
+#[test]
+fn create_world_key_outlives_its_ttl_while_the_world_is_running() {
+    let (h, mut e, f) = setup("idem-live-world");
+    let key = IdempotencyKey::new("alice", "create-1");
+    let req = world_req(f, &[]);
+    let w = e.create_world(&req, Some(&key)).unwrap();
+    let ttl = e.config().idempotency_ttl_ms;
+    h.clock.advance(ttl + 1);
+    e.collect_garbage(h.clock.now_ms()).unwrap();
+    assert_eq!(
+        e.create_world(&req, Some(&key)).unwrap().world_id,
+        w.world_id,
+        "a retry must not create a second world next to the running one"
+    );
+
+    e.expire_idle_world_leases(|_| false).unwrap();
+    e.collect_garbage(h.clock.now_ms()).unwrap();
+    assert_ne!(e.create_world(&req, Some(&key)).unwrap().world_id, w.world_id);
 }

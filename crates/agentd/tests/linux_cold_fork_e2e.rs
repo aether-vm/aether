@@ -536,6 +536,69 @@ fn live_destroy_interrupts_inflight_exec_without_blocking_other_worlds() {
 }
 
 #[test]
+fn live_gc_reclaims_only_frames_whose_deletion_was_requested_and_is_unheld() {
+    let Some(mut h) = E2eHarness::new() else {
+        return;
+    };
+    let (aos, untouched) = start_with_base_frame(&mut h);
+    let tar = h.base_dir.join("gc.tar");
+    let import = |h: &E2eHarness| {
+        let (ok, out, err) = run_aos(
+            &aos,
+            &h.sock_path,
+            &["--json", "frame", "import", tar.to_str().unwrap()],
+        );
+        assert!(ok, "aos frame import failed: {err}");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        json["frame_id"].as_str().unwrap().to_owned()
+    };
+    let src = h.base_dir.join("gc-src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("f"), b"x").unwrap();
+    let st = Command::new("tar")
+        .args(["--format=ustar", "-cf"])
+        .arg(&tar)
+        .arg("-C")
+        .arg(&src)
+        .arg(".")
+        .status()
+        .unwrap();
+    assert!(st.success());
+
+    let (expiring, pinned, based) = (import(&h), import(&h), import(&h));
+    let aos_ok = |h: &E2eHarness, args: &[&str]| {
+        let (ok, out, err) = run_aos(&aos, &h.sock_path, args);
+        assert!(ok, "aos {args:?} failed: {err}");
+        out
+    };
+    aos_ok(&h, &["frame", "pin", &expiring, "--pin-id", "p", "--ttl-ms", "1500"]);
+    aos_ok(&h, &["frame", "pin", &pinned, "--pin-id", "p", "--ttl-ms", "600000"]);
+    // Expired pin, but nobody asked for this frame to be deleted.
+    aos_ok(&h, &["frame", "pin", &based, "--pin-id", "p", "--ttl-ms", "1"]);
+    for f in [&expiring, &pinned] {
+        aos_ok(&h, &["frame", "delete", f]);
+    }
+    let objects = h.pool_dir.join("objects");
+    let on_disk = |f: &str| {
+        fs::read_dir(&objects)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().contains(f))
+    };
+    for f in [&untouched, &expiring, &pinned, &based] {
+        assert!(on_disk(f), "frame {f} must still be on disk");
+    }
+
+    wait_until("frame reclaimed after its last pin expired", 60, || !on_disk(&expiring));
+    let (ok, _, _) = run_aos(&aos, &h.sock_path, &["frame", "get", &expiring]);
+    assert!(!ok, "a reclaimed frame must not be listed any more");
+    for f in [&untouched, &pinned, &based] {
+        assert!(on_disk(f), "frame {f} must survive GC");
+        aos_ok(&h, &["frame", "get", f]);
+    }
+}
+
+#[test]
 fn live_quarantined_btrfs_orphans_are_purged_only_after_their_grace_period() {
     use agentd::backend::ProductionRecoveryHooks;
     use aos_meta::{Clock, ManualClock, MetaConfig, MetaEngine};
@@ -606,7 +669,8 @@ fn live_quarantined_btrfs_orphans_are_purged_only_after_their_grace_period() {
     assert_eq!(e.collect_garbage(clock.now_ms()).unwrap().quarantine_purged, 0);
     assert_eq!(quarantined(), 5);
     clock.advance(1);
-    assert_eq!(e.collect_garbage(clock.now_ms()).unwrap().quarantine_purged, 5);
+    let gc = e.collect_garbage(clock.now_ms()).unwrap();
+    assert_eq!((gc.quarantine_purged, gc.failures), (5, vec![]));
     assert_eq!(quarantined(), 0);
     assert!(outside.join("precious").exists(), "a quarantined symlink must not be followed");
 }

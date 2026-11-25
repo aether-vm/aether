@@ -9,13 +9,14 @@
 //!   refusal, and clean socket teardown.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use agentd::backend::{
     build_ustar_archive, InMemorySandboxBackend, LocalDevTreeBackend, SandboxBackend,
     SandboxExecRequest, SandboxExecResult, SandboxOutputChunk, SpawnWorldSpec,
+    TreeBackend, ValidatedPatchBundle,
 };
 use agentd::error::{decode_error_detail, BackendError};
 use agentd::proto::frame_service_server::FrameService;
@@ -31,7 +32,7 @@ use agentd::proto::{
 };
 use agentd::service::AgentdService;
 use aos_meta::{FsArtifactBackend, ManualClock, MetaConfig, MetaEngine};
-use aos_types::{BootId, WorldId};
+use aos_types::{BootId, PersistProof, WorldId};
 use tokio_stream::StreamExt;
 use tonic::Request;
 
@@ -72,6 +73,15 @@ impl TestEnv {
     }
 
     fn boot_service_with(&self, sandbox: Arc<dyn SandboxBackend>) -> AgentdService {
+        let tree = Arc::new(LocalDevTreeBackend::new(self.root.join("worlds")));
+        self.boot_service_on(tree, sandbox)
+    }
+
+    fn boot_service_on(
+        &self,
+        tree: Arc<dyn TreeBackend>,
+        sandbox: Arc<dyn SandboxBackend>,
+    ) -> AgentdService {
         let boot = BootId::parse(TEST_BOOT).unwrap();
         let (engine, _) = MetaEngine::open_and_recover(
             self.cfg.clone(),
@@ -80,7 +90,6 @@ impl TestEnv {
             self.clock.clone(),
         )
         .expect("open_and_recover");
-        let tree = Arc::new(LocalDevTreeBackend::new(self.root.join("worlds")));
         AgentdService::new(engine, tree, sandbox)
     }
 }
@@ -1529,4 +1538,126 @@ fn a_world_destroyed_under_an_operation_is_not_running() {
     let w = WorldId::random();
     let err = agentd::backend::map_sandbox_error(w, aos_sandbox::SandboxError::WorldDestroyed);
     assert!(matches!(err, BackendError::WorldNotRunning(id) if id == w), "{err:?}");
+}
+
+type Callback = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
+
+/// Runs `during` after each patch was computed, before it is returned.
+struct HookedExport {
+    inner: LocalDevTreeBackend,
+    during: Callback,
+}
+
+impl TreeBackend for HookedExport {
+    fn import_tar(&self, target: &Path, tar: &[u8]) -> Result<PersistProof, BackendError> {
+        self.inner.import_tar(target, tar)
+    }
+    fn create_writable_clone(&self, base: &Path, w: WorldId) -> Result<PathBuf, BackendError> {
+        self.inner.create_writable_clone(base, w)
+    }
+    fn snapshot_readonly(&self, live: &Path, to: &Path) -> Result<PersistProof, BackendError> {
+        self.inner.snapshot_readonly(live, to)
+    }
+    fn destroy_subvolume(&self, path: &Path) -> Result<(), BackendError> {
+        self.inner.destroy_subvolume(path)
+    }
+    fn export_patch(&self, base: &Path, to: &Path) -> Result<ValidatedPatchBundle, BackendError> {
+        let bundle = self.inner.export_patch(base, to);
+        if let Some(f) = self.during.lock().unwrap().take() {
+            f();
+        }
+        bundle
+    }
+}
+
+#[tokio::test]
+async fn export_patch_fails_when_a_frame_is_deleted_underneath_it() {
+    let env = TestEnv::new("export-race");
+    let during = Callback::default();
+    let svc = env.boot_service_on(
+        Arc::new(HookedExport {
+            inner: LocalDevTreeBackend::new(env.root.join("worlds")),
+            during: during.clone(),
+        }),
+        Arc::new(InMemorySandboxBackend::new()),
+    );
+    let base = import_base(&svc, "bob").await;
+    let target = import_base(&svc, "bob").await;
+    let export = || {
+        svc.export_patch(Request::new(ExportPatchRequest {
+            owner: "bob".into(),
+            base_frame_id: base.clone(),
+            target_frame_id: target.clone(),
+        }))
+    };
+    export().await.expect("undisturbed export");
+
+    let (s, f) = (svc.clone(), base.clone());
+    *during.lock().unwrap() = Some(Box::new(move || {
+        let (s, f) = (s.clone(), f.clone());
+        std::thread::spawn(move || {
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(s.delete_frame(Request::new(DeleteFrameRequest {
+                    owner: "bob".into(),
+                    frame_id: f,
+                    ..Default::default()
+                })))
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+    }));
+    let err = export()
+        .await
+        .expect_err("the diff may have read a half-deleted tree");
+    assert_eq!(
+        decode_error_detail(&err).unwrap().code,
+        ErrorCode::FrameNotFound as i32
+    );
+}
+
+#[tokio::test]
+async fn gc_reclaims_a_deferred_frame_once_its_world_is_gone() {
+    let env = TestEnv::new("gc-world");
+    let svc = env.boot_service();
+    let base = import_base(&svc, "bob").await;
+    let world = svc
+        .create_world(Request::new(keyed_create(&base, "cw")))
+        .await
+        .unwrap()
+        .into_inner()
+        .world
+        .unwrap();
+    let deleted = svc
+        .delete_frame(Request::new(DeleteFrameRequest {
+            owner: "bob".into(),
+            frame_id: base.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(deleted.deferred, "held by the world: {deleted:?}");
+    let get = || {
+        svc.get_frame(Request::new(GetFrameRequest {
+            frame_id: base.clone(),
+        }))
+    };
+
+    assert_eq!(svc.collect_garbage().unwrap().frames_deleted, 0);
+    get().await.expect("a held frame must survive GC");
+    assert_eq!(std::fs::read_dir(env.cfg.objects_dir()).unwrap().count(), 1);
+
+    svc.destroy_world(Request::new(DestroyWorldRequest {
+        world_id: world.world_id,
+        owner: "bob".into(),
+        fencing_token: world.fencing_token,
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    assert_eq!(svc.collect_garbage().unwrap().frames_deleted, 1);
+    get().await.expect_err("reclaimed");
+    assert_eq!(std::fs::read_dir(env.cfg.objects_dir()).unwrap().count(), 0);
 }

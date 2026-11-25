@@ -1162,9 +1162,12 @@ pub fn run(ctx: &crate::Ctx, args: &Args) -> Result<ExpOutput> {
         if !db_q.is_empty() && round % 20 == 19 {
             clock.advance(cfg.quarantine_grace_ms);
             let now = clock.now_ms();
-            engine
+            let gc = engine
                 .collect_garbage(now)
                 .map_err(|e| anyhow!("round {round}: collect_garbage failed: {e}"))?;
+            if !gc.failures.is_empty() {
+                return Err(anyhow!("round {round}: gc failures: {:?}", gc.failures));
+            }
         }
 
         total_preparing_rolled_back += summary.preparing_rolled_back;

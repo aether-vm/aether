@@ -24,6 +24,8 @@ use agentd::transport::{serve_uds, DEFAULT_SOCKET_PATH};
 
 /// How often expired world leases are looked for (pure memory unless one is due).
 const LEASE_REAP_INTERVAL: Duration = Duration::from_secs(1);
+/// How often expired pins, deferred deletions, quarantine and old records are collected.
+const GC_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum BackendMode {
@@ -203,6 +205,36 @@ async fn main() -> Result<()> {
                 }
                 Ok(Err(e)) => eprintln!("agentd: lease reaper failed: {e}"),
                 Err(e) => eprintln!("agentd: lease reaper panicked: {e}"),
+            }
+        }
+    });
+
+    let collector = service.clone();
+    tokio::spawn(async move {
+        let mut tick =
+            tokio::time::interval_at(tokio::time::Instant::now() + GC_INTERVAL, GC_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_failures = Vec::new();
+        loop {
+            tick.tick().await;
+            let svc = collector.clone();
+            match tokio::task::spawn_blocking(move || svc.collect_garbage()).await {
+                Ok(Ok(r)) => {
+                    if r.pins_expired + r.frames_deleted + r.quarantine_purged > 0 {
+                        eprintln!(
+                            "agentd: gc pins_expired={} frames_deleted={} quarantine_purged={}",
+                            r.pins_expired, r.frames_deleted, r.quarantine_purged
+                        );
+                    }
+                    if r.failures != last_failures {
+                        for f in &r.failures {
+                            eprintln!("agentd: gc could not delete {f} (will retry)");
+                        }
+                        last_failures = r.failures;
+                    }
+                }
+                Ok(Err(e)) => eprintln!("agentd: gc failed: {e}"),
+                Err(e) => eprintln!("agentd: gc panicked: {e}"),
             }
         }
     });

@@ -292,6 +292,7 @@ fn fifty_rounds_of_random_crashes_keep_metadata_and_pool_in_lockstep() {
             h.clock.advance(grace);
             let now = aos_meta::Clock::now_ms(&*h.clock);
             let gc = e.collect_garbage(now).unwrap();
+            assert!(gc.failures.is_empty(), "{:?}", gc.failures);
             assert_eq!(gc.quarantine_purged, quarantined_live);
             assert_eq!(gc.pins_expired, 0, "pins were renewed by recovery");
             assert_eq!(gc.frames_deleted, 0);

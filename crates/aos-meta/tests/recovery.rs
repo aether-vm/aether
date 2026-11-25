@@ -5,7 +5,7 @@ mod common;
 use std::sync::atomic::Ordering;
 
 use aos_meta::{
-    CreateWorldRequest, FrameDurability, FrameState, Hold, MetaError, ObjectKind, PinSpec,
+    Clock, CreateWorldRequest, FrameDurability, FrameState, Hold, MetaError, ObjectKind, PinSpec,
     WorldState,
 };
 use aos_types::{EpochId, FrameId};
@@ -307,4 +307,96 @@ fn breaker_trips_on_orphan_ratio_and_releases_once_within_limits() {
     assert_eq!(s.orphans_quarantined, 2);
     assert_eq!(e.frames().unwrap().len(), 25);
     assert_eq!(h.pool_objects().len(), 25);
+}
+
+#[test]
+fn one_undeletable_object_does_not_stop_the_rest_of_the_gc_pass() {
+    let mut h = Harness::new("gc-isolate");
+    h.cfg.max_small_pool_orphans = 3;
+    let (e, _) = h.open(boot_a());
+    drop(e);
+    h.add_orphan("a-stuck.tmp");
+    h.add_orphan("b-free.tmp");
+    let (mut e, s) = h.open(boot_a());
+    assert_eq!(s.orphans_quarantined, 2);
+
+    // Two frames left `Deleting` by a failed delete; only the first one stays undeletable.
+    let mut stuck = h.durable(&mut e);
+    let mut free = h.durable(&mut e);
+    if free.to_string() < stuck.to_string() {
+        std::mem::swap(&mut stuck, &mut free);
+    }
+    let stuck_object = names(&e, stuck)[0].clone();
+    h.ctl.fail_destroy.store(true, Ordering::SeqCst);
+    for f in [stuck, free] {
+        assert!(e.delete_frame(f, "alice", None).is_err());
+    }
+    h.ctl.fail_destroy.store(false, Ordering::SeqCst);
+    let key = aos_meta::IdempotencyKey::new("alice", "old");
+    let req = Harness::prepare_req("alice", FrameDurability::Durable, None, &[ObjectKind::DiskImage]);
+    e.prepare_frame(&req, Some(&key)).unwrap();
+
+    *h.ctl.fail_destroy_of.lock().unwrap() = Some(stuck_object);
+    h.clock.advance(e.config().quarantine_grace_ms);
+    let gc = e.collect_garbage(h.clock.now_ms()).expect("the pass itself must not fail");
+    assert_eq!(gc.frames_deleted, 1);
+    assert!(e.frame(free).unwrap().is_none());
+    assert!(matches!(
+        e.frame(stuck).unwrap().unwrap().state,
+        aos_meta::FrameState::Deleting { .. }
+    ));
+    assert_eq!(gc.quarantine_purged, 2);
+    assert_eq!(gc.idempotency_purged, 1);
+
+    // It is retried, not forgotten.
+    *h.ctl.fail_destroy_of.lock().unwrap() = None;
+    assert_eq!(e.collect_garbage(h.clock.now_ms()).unwrap().frames_deleted, 1);
+    assert!(e.frame(stuck).unwrap().is_none());
+}
+
+#[test]
+fn one_unpurgeable_quarantine_entry_does_not_keep_the_others() {
+    let mut h = Harness::new("gc-isolate-q");
+    h.cfg.max_small_pool_orphans = 3;
+    let (e, _) = h.open(boot_a());
+    drop(e);
+    for n in ["a-stuck.tmp", "b-free.tmp"] {
+        h.add_orphan(n);
+    }
+    let (mut e, _) = h.open(boot_a());
+    *h.ctl.fail_destroy_of.lock().unwrap() = Some("a-stuck.tmp".into());
+    h.clock.advance(e.config().quarantine_grace_ms);
+    let gc = e.collect_garbage(h.clock.now_ms()).expect("the pass itself must not fail");
+    assert_eq!(gc.quarantine_purged, 1);
+    let left = e.quarantine_records().unwrap();
+    assert_eq!(left.len(), 1, "a failed purge keeps its record");
+    assert_eq!(left[0].name, "a-stuck.tmp");
+    assert_eq!(h.quarantine_entries().len(), 1);
+}
+
+#[test]
+fn gc_batches_bound_deletions_and_get_past_undeletable_objects() {
+    let h = Harness::new("gc-batch");
+    let (mut e, _) = h.open(boot_a());
+    let mut frames: Vec<_> = (0..5).map(|_| h.durable(&mut e)).collect();
+    frames.sort_by_key(ToString::to_string);
+    let stuck = names(&e, frames[0])[0].clone();
+    h.ctl.fail_destroy.store(true, Ordering::SeqCst);
+    for f in &frames {
+        assert!(e.delete_frame(*f, "alice", None).is_err());
+    }
+    h.ctl.fail_destroy.store(false, Ordering::SeqCst);
+    *h.ctl.fail_destroy_of.lock().unwrap() = Some(stuck);
+
+    let mut deleted = Vec::new();
+    loop {
+        let r = e.collect_garbage_batch(2).unwrap();
+        assert_eq!(r.failures.len(), 1);
+        deleted.push(r.frames_deleted);
+        if !r.more {
+            break;
+        }
+    }
+    assert_eq!(deleted, [2, 2], "4 of 5 frames, at most 2 at a time, then done");
+    assert!(e.frame(frames[0]).unwrap().is_some());
 }

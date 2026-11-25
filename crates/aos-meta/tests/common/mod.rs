@@ -34,12 +34,19 @@ pub struct HookCtl {
     pub fail_fence: AtomicBool,
     pub fail_kill: AtomicBool,
     pub fail_destroy: AtomicBool,
+    /// Fail only for the pool path or quarantine entry with this file name.
+    pub fail_destroy_of: Mutex<Option<String>>,
     pub calls: Mutex<Vec<String>>,
 }
 
 impl HookCtl {
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn fails_for(&self, path: &Path) -> bool {
+        let name = path.file_name().and_then(|n| n.to_str());
+        name.is_some() && self.fail_destroy_of.lock().unwrap().as_deref() == name
     }
 
     fn log(&self, s: String) {
@@ -75,7 +82,7 @@ impl RecoveryHooks for TestHooks {
 
     fn destroy_pool_object(&mut self, path: &Path, object: &ManagedObject) -> io::Result<()> {
         self.ctl.log(format!("destroy_pool:{object}"));
-        if self.ctl.fail_destroy.load(Ordering::SeqCst) {
+        if self.ctl.fail_destroy.load(Ordering::SeqCst) || self.ctl.fails_for(path) {
             return Err(injected("destroy"));
         }
         self.inner.destroy_pool_object(path, object)
@@ -87,6 +94,13 @@ impl RecoveryHooks for TestHooks {
             return Err(injected("destroy"));
         }
         self.inner.destroy_volatile_object(object)
+    }
+
+    fn purge_quarantined(&mut self, path: &Path) -> io::Result<()> {
+        if self.ctl.fails_for(path) {
+            return Err(injected("purge"));
+        }
+        self.inner.purge_quarantined(path)
     }
 }
 

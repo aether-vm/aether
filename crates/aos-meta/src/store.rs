@@ -209,6 +209,10 @@ pub struct GcReport {
     pub tombstones_purged: usize,
     /// Idempotency records dropped.
     pub idempotency_purged: usize,
+    /// Objects that could not be destroyed. They stay recorded and are retried by the next pass.
+    pub failures: Vec<String>,
+    /// The deletion limit was reached with work left over.
+    pub more: bool,
 }
 
 pub(crate) fn wrong_state(frame: FrameId, expected: &'static str, s: &FrameState) -> MetaError {
@@ -1053,6 +1057,15 @@ impl MetaEngine {
     /// quarantine entries past their grace period and drop stale tombstones / idempotency
     /// records.
     pub fn collect_garbage(&mut self, _now_ms: u64) -> Result<GcReport> {
+        self.collect_garbage_batch(usize::MAX)
+    }
+
+    /// [`Self::collect_garbage`] that stops after `max_deletions` physical deletions, so a caller
+    /// sharing the engine can release it in between.
+    ///
+    /// An object that cannot be destroyed is reported in [`GcReport::failures`], does not count
+    /// against the limit and does not stop the pass.
+    pub fn collect_garbage_batch(&mut self, max_deletions: usize) -> Result<GcReport> {
         let now_ms = self.now_ms();
         let now_inst = self.clock.now_instant();
         let mut report = GcReport::default();
@@ -1124,9 +1137,22 @@ impl MetaEngine {
             .into_iter()
             .filter(|r| matches!(r.state, FrameState::Deleting { .. }))
             .collect();
+        let mut budget = max_deletions;
         for rec in &deleting {
-            self.complete_deletion(rec)?;
-            report.frames_deleted += 1;
+            if budget == 0 {
+                report.more = true;
+                break;
+            }
+            match self.complete_deletion(rec) {
+                Ok(()) => {
+                    report.frames_deleted += 1;
+                    budget -= 1;
+                }
+                Err(e @ MetaError::Hook { .. }) => {
+                    report.failures.push(format!("frame {}: {e}", rec.frame_id));
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         // 4. quarantine purge (physical delete first, record second: a crash in between only
@@ -1136,28 +1162,35 @@ impl MetaEngine {
             .into_iter()
             .filter(|r| now_ms >= r.purge_after_ms)
             .collect();
-        if !due.is_empty() {
-            let qroot = self.cfg.quarantine_dir();
-            for r in &due {
-                let dir = qroot.join(r.quarantined_epoch.cgroup_dir_name());
-                ignore_not_found(self.hooks.purge_quarantined(&dir.join(r.file_name()))).map_err(
-                    |source| MetaError::Hook {
-                        stage: "purge_quarantined",
-                        source,
-                    },
-                )?;
-                // Best effort: the epoch directory disappears once its last entry is purged.
-                let _ = std::fs::remove_dir(&dir);
+        let qroot = self.cfg.quarantine_dir();
+        let mut purged = Vec::new();
+        for r in &due {
+            if budget == 0 {
+                report.more = true;
+                break;
             }
+            let dir = qroot.join(r.quarantined_epoch.cgroup_dir_name());
+            let path = dir.join(r.file_name());
+            match ignore_not_found(self.hooks.purge_quarantined(&path)) {
+                Ok(()) => {
+                    purged.push(r);
+                    budget -= 1;
+                    // Best effort: the epoch directory disappears once its last entry is purged.
+                    let _ = std::fs::remove_dir(&dir);
+                }
+                Err(e) => report.failures.push(format!("{}: {e}", path.display())),
+            }
+        }
+        if !purged.is_empty() {
             let tx = begin_write(&self.db)?;
             {
                 let mut q = tx.open_table(QUARANTINE)?;
-                for r in &due {
+                for r in &purged {
                     q.remove(tables::quarantine_key(r).as_str())?;
                 }
             }
             tx.commit()?;
-            report.quarantine_purged = due.len();
+            report.quarantine_purged = purged.len();
         }
 
         // 5. tombstones + 6. idempotency records.
@@ -1175,10 +1208,18 @@ impl MetaEngine {
             }
             let mut idem_t = tx.open_table(IDEMPOTENCY)?;
             for (key, r) in tables::scan_json::<IdempotencyRecord, _>(&idem_t)? {
-                if r.recorded_at_ms.saturating_add(self.cfg.idempotency_ttl_ms) <= now_ms {
-                    idem_t.remove(key.as_str())?;
-                    report.idempotency_purged += 1;
+                if r.recorded_at_ms.saturating_add(self.cfg.idempotency_ttl_ms) > now_ms {
+                    continue;
                 }
+                // Forgetting the key of a running world would let a retry create a second one.
+                if let IdemResponse::World(id) = &r.response
+                    && tables::load_world(&worlds, id)?
+                        .is_some_and(|w| w.state.ended_at_ms().is_none())
+                {
+                    continue;
+                }
+                idem_t.remove(key.as_str())?;
+                report.idempotency_purged += 1;
             }
         }
         tx.commit()?;
