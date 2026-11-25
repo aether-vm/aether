@@ -12,8 +12,8 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aos_sandbox::{
-    DEFAULT_CGROUP_SLICE_ROOT, ExecReply, ExecRequest, GuestAgentSource, IdMapRange, NamespaceDriver, SandboxDriver,
-    SandboxError, SpawnWorldSpec, WorldHandle,
+    DEFAULT_CGROUP_SLICE_ROOT, ExecReply, ExecRequest, GuestAgentSource, IdMapRange, NamespaceDriver, ResourceLimits,
+    SandboxDriver, SandboxError, SpawnWorldSpec, WorldHandle,
 };
 use aos_types::{EpochId, WorldId};
 
@@ -220,4 +220,102 @@ fn explicit_map_to_host_root_is_rejected_for_root_agentd() {
             "mapping to host id 0 must be rejected, got {err:?}"
         );
     }
+}
+
+#[test]
+fn default_limits_are_enforced_on_the_world_cgroup() {
+    let Some(scratch) = Scratch::new("limits") else {
+        return;
+    };
+    let mut world = NamespaceDriver::new().spawn_world(scratch.spec()).unwrap();
+    let cg = world.info().cgroup_path.clone().unwrap();
+    let read = |f: &str| {
+        fs::read_to_string(cg.join(f))
+            .unwrap_or_else(|e| panic!("{f} unavailable on world cgroup: {e}"))
+            .trim()
+            .to_owned()
+    };
+    assert_eq!(read("memory.max"), (2u64 << 30).to_string());
+    assert_eq!(read("memory.swap.max"), "0");
+    assert_eq!(read("pids.max"), "512");
+    world.destroy().unwrap();
+}
+
+#[test]
+fn default_pids_limit_contains_a_fork_bomb() {
+    let Some(scratch) = Scratch::new("pids") else {
+        return;
+    };
+    let mut world = NamespaceDriver::new().spawn_world(scratch.spec()).unwrap();
+    let cg = world.info().cgroup_path.clone().unwrap();
+    // `setsid` execs, so the sleepers do not keep busybox's saved copies of the exec pipes open.
+    sh(
+        &mut world,
+        "bomb",
+        "i=0; while [ $i -lt 700 ]; do setsid sleep 60 >/dev/null 2>&1 & i=$((i+1)); done; true",
+    );
+    let tasks = fs::read_to_string(cg.join("cgroup.procs"))
+        .unwrap()
+        .lines()
+        .count();
+    assert!(tasks > 100, "fork bomb did not run, got {tasks} processes");
+    assert!(tasks <= 512, "fork bomb created {tasks} processes");
+    assert_eq!(world.ping(7).expect("world survives").nonce, 7);
+    world.destroy().unwrap();
+}
+
+#[test]
+fn explicit_limits_contain_memory_hog_and_write_cpu_max() {
+    let Some(scratch) = Scratch::new("mem") else {
+        return;
+    };
+    let mut spec = scratch.spec();
+    spec.limits = ResourceLimits {
+        memory_max_bytes: Some(48 << 20),
+        pids_max: Some(64),
+        cpu_max_percent: Some(150),
+    };
+    let mut world = NamespaceDriver::new().spawn_world(spec).unwrap();
+    let cg = world.info().cgroup_path.clone().unwrap();
+    assert_eq!(
+        fs::read_to_string(cg.join("cpu.max")).unwrap().trim(),
+        "150000 100000"
+    );
+    // `tail -c` buffers everything it might have to print.
+    let hog = sh(
+        &mut world,
+        "hog",
+        "head -c 200000000 /dev/zero | tail -c 150000000 | wc -c",
+    );
+    let events = fs::read_to_string(cg.join("memory.events")).unwrap();
+    let oom_kills: u64 = events
+        .lines()
+        .find_map(|l| l.strip_prefix("oom_kill "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(oom_kills >= 1, "expected an OOM kill, got {events} ({hog:?})");
+    assert_ne!(stdout(&hog), "150000000", "hog escaped memory.max");
+    assert_eq!(world.ping(9).expect("aos-guest survives OOM").nonce, 9);
+    world.destroy().unwrap();
+}
+
+#[test]
+fn none_limits_stay_unlimited() {
+    let Some(scratch) = Scratch::new("nolimit") else {
+        return;
+    };
+    let mut spec = scratch.spec();
+    spec.limits = ResourceLimits {
+        memory_max_bytes: None,
+        pids_max: None,
+        cpu_max_percent: None,
+    };
+    let mut world = NamespaceDriver::new().spawn_world(spec).unwrap();
+    let cg = world.info().cgroup_path.clone().unwrap();
+    for file in ["memory.max", "pids.max"] {
+        let v = fs::read_to_string(cg.join(file)).unwrap_or_else(|_| "max".to_owned());
+        assert_eq!(v.trim(), "max", "{file}");
+    }
+    world.destroy().unwrap();
 }

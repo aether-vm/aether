@@ -20,8 +20,9 @@ use aos_guest::OutputStream;
 use aos_meta::{ManagedObject, RecoveryHooks};
 use aos_sandbox::{
     ExecRequest as SbxExecRequest, FreezeOptions, GuestAgentSource, NamespaceDriver, NetnsMode,
-    SandboxDriver, SandboxError, SeccompPolicy, SpawnWorldSpec as DriverSpawnSpec, WorldHandle,
-    DEFAULT_CGROUP_SLICE_ROOT, DEFAULT_HANDSHAKE_TIMEOUT,
+    ResourceLimits, SandboxDriver, SandboxError, SeccompPolicy,
+    SpawnWorldSpec as DriverSpawnSpec, WorldHandle, DEFAULT_CGROUP_SLICE_ROOT,
+    DEFAULT_HANDSHAKE_TIMEOUT,
 };
 use aos_store::{
     ExportPatchOptions, PatchFileChange, StoreError, TarImportOptions, TreeStore,
@@ -1098,6 +1099,8 @@ pub struct NamespaceSandboxConfig {
     pub cgroup_root: PathBuf,
     /// Enable `clone3(CLONE_INTO_CGROUP)` + `cgroup.kill`.
     pub enable_cgroup: bool,
+    /// Per-world cgroup resource limits.
+    pub limits: ResourceLimits,
     /// Enable `CLONE_NEWUSER`.
     pub enable_userns: bool,
     /// Network namespace mode.
@@ -1116,6 +1119,7 @@ impl NamespaceSandboxConfig {
             guest_agent: GuestAgentSource::InRootfs(PathBuf::from("/sbin/init")),
             cgroup_root: PathBuf::from(DEFAULT_CGROUP_SLICE_ROOT),
             enable_cgroup: true,
+            limits: ResourceLimits::default(),
             enable_userns: true,
             netns_mode: NetnsMode::IsolatedLoopback,
             seccomp_policy: SeccompPolicy::StrictBaseline,
@@ -1172,6 +1176,7 @@ impl SandboxBackend for NamespaceSandboxBackend {
         );
         drv_spec.cgroup_root = self.cfg.cgroup_root.clone();
         drv_spec.enable_cgroup = self.cfg.enable_cgroup;
+        drv_spec.limits = self.cfg.limits;
         drv_spec.enable_userns = self.cfg.enable_userns;
         drv_spec.netns_mode = self.cfg.netns_mode;
         drv_spec.seccomp_policy = self.cfg.seccomp_policy;

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use aos_gw::{AuditStore, EpochFenceRegistry};
 use aos_meta::{FsArtifactBackend, MetaConfig, MetaEngine, RecoveryHooks, SystemClock};
-use aos_sandbox::{GuestAgentSource, DEFAULT_CGROUP_SLICE_ROOT};
+use aos_sandbox::{GuestAgentSource, ResourceLimits, DEFAULT_CGROUP_SLICE_ROOT};
 use aos_store::{TreeStore, TreeStoreConfig};
 use aos_types::{BootId, EpochId};
 use clap::{Parser, ValueEnum};
@@ -75,6 +75,15 @@ struct Cli {
     /// Disable `CLONE_NEWUSER` in `production` mode (testing ONLY).
     #[arg(long, default_value_t = false)]
     no_userns: bool,
+    /// Per-world memory limit in MiB for `production` mode (`0` = unlimited; swap is disabled).
+    #[arg(long, default_value_t = 2048)]
+    world_memory_max_mib: u64,
+    /// Per-world limit on processes and threads for `production` mode (`0` = unlimited).
+    #[arg(long, default_value_t = 512)]
+    world_pids_max: u64,
+    /// Per-world CPU limit in percent of one CPU for `production` mode (`0` = unlimited).
+    #[arg(long, default_value_t = 0)]
+    world_cpu_max_percent: u32,
     /// Maximum `ImportTar` streaming payload in MiB.
     #[arg(long, default_value_t = 256)]
     max_import_mib: usize,
@@ -141,6 +150,13 @@ async fn main() -> Result<()> {
             sbx_cfg.cgroup_root = cli.cgroup_root;
             sbx_cfg.enable_cgroup = !cli.no_cgroup;
             sbx_cfg.enable_userns = !cli.no_userns;
+            sbx_cfg.limits = ResourceLimits {
+                memory_max_bytes: (cli.world_memory_max_mib > 0)
+                    .then(|| cli.world_memory_max_mib.saturating_mul(1024 * 1024)),
+                pids_max: (cli.world_pids_max > 0).then_some(cli.world_pids_max),
+                cpu_max_percent: (cli.world_cpu_max_percent > 0)
+                    .then_some(cli.world_cpu_max_percent),
+            };
 
             let tree: Arc<dyn TreeBackend> = Arc::new(TreeStoreBackend::new(store));
             let sandbox: Arc<dyn SandboxBackend> = Arc::new(NamespaceSandboxBackend::new(sbx_cfg));

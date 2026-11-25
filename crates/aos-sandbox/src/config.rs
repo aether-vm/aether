@@ -89,6 +89,27 @@ pub enum NetnsMode {
     InheritHost,
 }
 
+/// Host-enforced cgroup v2 limits of one `World`. `None` leaves a resource unlimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// `memory.max` in bytes. Swap is disabled for the world whenever this is set.
+    pub memory_max_bytes: Option<u64>,
+    /// `pids.max`; the kernel counts threads, including those of `aos-guest`.
+    pub pids_max: Option<u64>,
+    /// `cpu.max` in percent of one CPU (`200` = two CPUs).
+    pub cpu_max_percent: Option<u32>,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            memory_max_bytes: Some(2 << 30),
+            pids_max: Some(512),
+            cpu_max_percent: None,
+        }
+    }
+}
+
 /// Specification for spawning a `World` under `NamespaceDriver`.
 #[derive(Debug, Clone)]
 pub struct SpawnWorldSpec {
@@ -102,6 +123,8 @@ pub struct SpawnWorldSpec {
     pub cgroup_root: PathBuf,
     /// Enable `clone3(CLONE_INTO_CGROUP)` + `cgroup.kill` lifecycle management.
     pub enable_cgroup: bool,
+    /// Resource limits written to the world cgroup (requires `enable_cgroup`).
+    pub limits: ResourceLimits,
     /// Enable `CLONE_NEWUSER` user namespace isolation.
     pub enable_userns: bool,
     /// Explicit UID mappings when `enable_userns == true`. Empty defaults to
@@ -137,6 +160,7 @@ impl SpawnWorldSpec {
             guest_agent,
             cgroup_root: PathBuf::from(DEFAULT_CGROUP_SLICE_ROOT),
             enable_cgroup: true,
+            limits: ResourceLimits::default(),
             enable_userns: true,
             uid_map: Vec::new(),
             gid_map: Vec::new(),
@@ -194,6 +218,12 @@ impl SpawnWorldSpec {
                     "uid_map / gid_map range count must be >= 1".to_owned(),
                 ));
             }
+        }
+        let l = &self.limits;
+        if l.memory_max_bytes == Some(0) || l.pids_max == Some(0) || l.cpu_max_percent == Some(0) {
+            return Err(SandboxError::InvalidConfig(
+                "resource limits must be > 0 (use None for unlimited)".to_owned(),
+            ));
         }
         let host = self.effective_hostname();
         if host.is_empty() || host.bytes().any(|b| b == 0) {

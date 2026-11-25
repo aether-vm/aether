@@ -202,6 +202,14 @@ fn spawn_spec_validation_and_cgroup_path_layout() {
     };
     assert!(matches!(bad.validate(), Err(SandboxError::InvalidConfig(_))));
 
+    // Reject zero resource limits.
+    let mut bad = spec.clone();
+    bad.limits.pids_max = Some(0);
+    assert!(matches!(
+        bad.validate(),
+        Err(SandboxError::InvalidConfig(_))
+    ));
+
     // Reject zero-count uid_map.
     let mut bad = spec.clone();
     bad.uid_map = vec![IdMapRange::new(0, 1000, 0)];

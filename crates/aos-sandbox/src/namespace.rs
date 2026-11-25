@@ -60,7 +60,8 @@ mod linux_impl {
     use crate::client::GuestRpcClient;
     use crate::config::{
         DEFAULT_USERNS_HOST_BASE, DEFAULT_USERNS_ID_COUNT, ExecOutputChunk, ExecReply, ExecRequest, FreezeOptions, FreezeReply, GuestAgentSource,
-        IdMapRange, NetnsMode, PingReply, SeccompPolicy, SpawnWorldSpec, WorldInfo,
+        IdMapRange, NetnsMode, PingReply, ResourceLimits, SeccompPolicy, SpawnWorldSpec,
+        WorldInfo,
     };
     use crate::driver::{WorldBackend, WorldHandle};
     use crate::error::SandboxError;
@@ -313,8 +314,14 @@ mod linux_impl {
                 SandboxError::InvalidConfig("world cgroup path missing parent".to_owned())
             })?;
             fs::create_dir_all(epoch_dir).map_err(|e| SandboxError::cgroup(epoch_dir, e))?;
+            enable_cgroup_controllers(epoch_dir, &spec.limits)?;
             // Leaf world cgroup MUST use `create_dir` (never silently reuse a colliding world).
             fs::create_dir(&path).map_err(|e| SandboxError::cgroup(&path, e))?;
+            // Limits are in place before `clone3` puts the first task into the world.
+            if let Err(e) = write_cgroup_limits(&path, &spec.limits) {
+                let _ = fs::remove_dir(&path);
+                return Err(e);
+            }
             Some(path)
         } else {
             None
@@ -488,6 +495,55 @@ mod linux_impl {
         };
 
         Ok(WorldHandle::from_backend(Box::new(backend)))
+    }
+
+    /// Delegate the controllers `limits` needs from the cgroup v2 mount root down to `dir`.
+    fn enable_cgroup_controllers(dir: &Path, limits: &ResourceLimits) -> Result<(), SandboxError> {
+        let wanted: Vec<&str> = [
+            (limits.memory_max_bytes.is_some(), "memory"),
+            (limits.pids_max.is_some(), "pids"),
+            (limits.cpu_max_percent.is_some(), "cpu"),
+        ]
+        .into_iter()
+        .filter_map(|(needed, name)| needed.then_some(name))
+        .collect();
+        let chain: Vec<&Path> = dir
+            .ancestors()
+            .take_while(|p| p.join("cgroup.controllers").exists())
+            .collect();
+        for parent in chain.into_iter().rev() {
+            let path = parent.join("cgroup.subtree_control");
+            let enabled =
+                fs::read_to_string(&path).map_err(|e| SandboxError::cgroup(&path, e))?;
+            for name in &wanted {
+                if !enabled.split_whitespace().any(|c| c == *name) {
+                    fs::write(&path, format!("+{name}"))
+                        .map_err(|e| SandboxError::cgroup(&path, format!("+{name}: {e}")))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_cgroup_limits(world_cg: &Path, limits: &ResourceLimits) -> Result<(), SandboxError> {
+        let write = |file: &str, value: String| {
+            let path = world_cg.join(file);
+            fs::write(&path, value).map_err(|e| SandboxError::cgroup(&path, e))
+        };
+        if let Some(bytes) = limits.memory_max_bytes {
+            write("memory.max", bytes.to_string())?;
+            // The file is absent on kernels without swap accounting.
+            if world_cg.join("memory.swap.max").exists() {
+                write("memory.swap.max", "0".to_owned())?;
+            }
+        }
+        if let Some(n) = limits.pids_max {
+            write("pids.max", n.to_string())?;
+        }
+        if let Some(percent) = limits.cpu_max_percent {
+            write("cpu.max", format!("{} 100000", u64::from(percent) * 1000))?;
+        }
+        Ok(())
     }
 
     /// Reject any symlink component along `rel_path` under `rootfs_dir` (P0-2).

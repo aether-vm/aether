@@ -29,7 +29,8 @@ pub use client::GuestRpcClient;
 pub use config::{
     DEFAULT_CGROUP_SLICE_ROOT, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_USERNS_HOST_BASE,
     DEFAULT_USERNS_ID_COUNT, ExecOutputChunk, ExecReply, ExecRequest, FreezeOptions, FreezeReply,
-    GuestAgentSource, IdMapRange, NetnsMode, PingReply, SeccompPolicy, SpawnWorldSpec, WorldInfo,
+    GuestAgentSource, IdMapRange, NetnsMode, PingReply, ResourceLimits, SeccompPolicy, SpawnWorldSpec,
+    WorldInfo,
 };
 pub use driver::{RpcWorldBackend, SandboxDriver, WorldBackend, WorldHandle};
 pub use error::SandboxError;

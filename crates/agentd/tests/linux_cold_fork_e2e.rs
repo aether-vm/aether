@@ -140,6 +140,10 @@ impl E2eHarness {
             .arg(&self.cgroup_root)
             .arg("--ballast-mib")
             .arg("32")
+            .arg("--world-memory-max-mib")
+            .arg("512")
+            .arg("--world-pids-max")
+            .arg("256")
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(err_file))
             .spawn()
@@ -539,6 +543,10 @@ fn live_linux_btrfs_namespace_agentd_and_aos_cli_cold_fork_e2e() {
 
     // 9. aos world destroy: cgroup.kill + Btrfs writable clone destruction
     let world_cg = h.cgroup_root.join("epoch-1").join(format!("w-{wid}"));
+    for (file, want) in [("memory.max", "536870912"), ("pids.max", "256")] {
+        let got = fs::read_to_string(world_cg.join(file)).expect("world limit file");
+        assert_eq!(got.trim(), want, "{file} must follow the agentd flag");
+    }
     let world_subvol = h.pool_dir.join("worlds").join(format!("w-{wid}"));
     assert!(world_cg.exists());
     assert!(world_subvol.exists());
