@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use aos_gw::{AuditStore, EpochFenceRegistry};
@@ -20,6 +21,9 @@ use agentd::backend::{
 };
 use agentd::service::AgentdService;
 use agentd::transport::{serve_uds, DEFAULT_SOCKET_PATH};
+
+/// How often expired world leases are looked for (pure memory unless one is due).
+const LEASE_REAP_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum BackendMode {
@@ -183,6 +187,25 @@ async fn main() -> Result<()> {
         cli.max_import_mib.saturating_mul(1024 * 1024),
     )
     .with_gateway(gateway_fence, Some(audit_store));
+
+    let reaper = service.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(LEASE_REAP_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let svc = reaper.clone();
+            match tokio::task::spawn_blocking(move || svc.reap_expired_worlds()).await {
+                Ok(Ok(expired)) => {
+                    for wid in expired {
+                        eprintln!("agentd: reaped world {wid} (lease expired)");
+                    }
+                }
+                Ok(Err(e)) => eprintln!("agentd: lease reaper failed: {e}"),
+                Err(e) => eprintln!("agentd: lease reaper panicked: {e}"),
+            }
+        }
+    });
 
     eprintln!(
         "agentd: listening on unix://{} (mode 0600, epoch {})",

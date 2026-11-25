@@ -76,6 +76,8 @@ pub struct CreateWorldRequest {
     pub labels: Labels,
     /// In-memory lease length (> 0).
     pub lease_ttl_ms: u64,
+    /// Requested driver; only distinguishes idempotent requests.
+    pub driver: String,
 }
 
 /// Result of [`MetaEngine::renew_pin_lease`].
@@ -219,6 +221,62 @@ impl MetaEngine {
         Ok(rec)
     }
 
+    /// The world an earlier `create_world` with this key and request produced, if any.
+    pub fn replay_create_world(
+        &self,
+        req: &CreateWorldRequest,
+        key: &IdempotencyKey,
+    ) -> Result<Option<WorldRecord>> {
+        const OP: &str = "create_world";
+        let digest = idem_prepare(Some(key), &req.owner, OP, req)?;
+        let found =
+            self.read_table(IDEMPOTENCY, |t| idem_lookup(t, Some(key), OP, digest.as_ref()))?;
+        let id = match found {
+            None => return Ok(None),
+            Some(IdemResponse::World(id)) => id,
+            Some(_) => return Err(MetaError::Codec("unexpected replay response".into())),
+        };
+        let mut w = self.world(id)?.ok_or(MetaError::WorldNotFound(id))?;
+        w.fencing_token = FencingToken::FIRST;
+        Ok(Some(w))
+    }
+
+    /// End a world whose sandbox never came up and, in the same transaction, forget the
+    /// idempotency key of its `create_world` so a retry starts over.
+    pub fn abort_create_world(
+        &mut self,
+        world: WorldId,
+        owner: &str,
+        idem: Option<&IdempotencyKey>,
+    ) -> Result<()> {
+        let now = self.now_ms();
+        let tx = begin_write(&self.db)?;
+        {
+            let mut worlds = tx.open_table(WORLDS)?;
+            let mut holds = tx.open_table(HOLDS)?;
+            let w = tables::load_world(&worlds, &world)?.ok_or(MetaError::WorldNotFound(world))?;
+            check_owner(|| format!("world {world}"), &w.owner, owner)?;
+            end_world(
+                &mut worlds,
+                &mut holds,
+                w,
+                now,
+                WorldEndReason::Requested { by: owner.into() },
+            )?;
+            if let Some(key) = idem {
+                let mut idem_t = tx.open_table(IDEMPOTENCY)?;
+                let ours = tables::load_idem(&idem_t, key)?
+                    .is_some_and(|r| r.response == IdemResponse::World(world));
+                if ours {
+                    idem_t.remove(tables::idem_key(key).as_str())?;
+                }
+            }
+        }
+        tx.commit()?;
+        self.world_leases.remove(&world);
+        Ok(())
+    }
+
     pub(crate) fn live_lease(
         &self,
         world: WorldId,
@@ -349,10 +407,28 @@ impl MetaEngine {
     /// End every world whose in-memory lease is due at `now`; returns the worlds the sandbox
     /// layer must kill.
     pub fn expire_due_world_leases(&mut self, now: Instant) -> Result<Vec<WorldId>> {
+        self.expire_leases(now, |_| false)
+    }
+
+    /// Like [`Self::expire_due_world_leases`] at the engine's current time, but postponing worlds
+    /// for which `busy` returns `true`.
+    pub fn expire_idle_world_leases(
+        &mut self,
+        busy: impl Fn(&WorldId) -> bool,
+    ) -> Result<Vec<WorldId>> {
+        let now = self.clock.now_instant();
+        self.expire_leases(now, busy)
+    }
+
+    fn expire_leases(
+        &mut self,
+        now: Instant,
+        busy: impl Fn(&WorldId) -> bool,
+    ) -> Result<Vec<WorldId>> {
         let mut due: Vec<WorldId> = self
             .world_leases
             .iter()
-            .filter(|(_, l)| l.expires_at <= now)
+            .filter(|(w, l)| l.expires_at <= now && !busy(w))
             .map(|(w, _)| *w)
             .collect();
         if due.is_empty() {

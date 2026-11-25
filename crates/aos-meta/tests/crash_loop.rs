@@ -205,6 +205,7 @@ fn fifty_rounds_of_random_crashes_keep_metadata_and_pool_in_lockstep() {
                             base_frame: f,
                             labels: labels(&[("round", &round.to_string())]),
                             lease_ttl_ms: 60_000,
+                            driver: "namespace".into(),
                         },
                         None,
                     )

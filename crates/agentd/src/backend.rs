@@ -1138,7 +1138,13 @@ impl NamespaceSandboxConfig {
 pub struct NamespaceSandboxBackend {
     driver: NamespaceDriver,
     cfg: NamespaceSandboxConfig,
-    worlds: Mutex<HashMap<WorldId, Arc<Mutex<WorldHandle>>>>,
+    worlds: Mutex<HashMap<WorldId, NamespaceWorld>>,
+}
+
+struct NamespaceWorld {
+    /// Locked for the whole duration of an `Exec`.
+    handle: Arc<Mutex<WorldHandle>>,
+    cgroup: Option<PathBuf>,
 }
 
 impl NamespaceSandboxBackend {
@@ -1156,7 +1162,7 @@ impl NamespaceSandboxBackend {
             .lock()
             .unwrap()
             .get(&world_id)
-            .cloned()
+            .map(|w| w.handle.clone())
             .ok_or(BackendError::WorldNotRunning(world_id))
     }
 }
@@ -1192,10 +1198,11 @@ impl SandboxBackend for NamespaceSandboxBackend {
             .driver
             .spawn_world(drv_spec)
             .map_err(map_sandbox_error)?;
-        self.worlds
-            .lock()
-            .unwrap()
-            .insert(spec.world_id, Arc::new(Mutex::new(handle)));
+        let world = NamespaceWorld {
+            cgroup: handle.info().cgroup_path.clone(),
+            handle: Arc::new(Mutex::new(handle)),
+        };
+        self.worlds.lock().unwrap().insert(spec.world_id, world);
         Ok(())
     }
 
@@ -1274,8 +1281,13 @@ impl SandboxBackend for NamespaceSandboxBackend {
     }
 
     fn destroy_world(&self, world_id: WorldId) -> Result<(), BackendError> {
-        if let Some(world_arc) = self.worlds.lock().unwrap().remove(&world_id) {
-            let mut handle = world_arc.lock().unwrap();
+        let removed = self.worlds.lock().unwrap().remove(&world_id);
+        if let Some(world) = removed {
+            // Kill first: an in-flight Exec holds the handle until its processes are gone.
+            if let Some(cg) = &world.cgroup {
+                let _ = fs::write(cg.join("cgroup.kill"), "1");
+            }
+            let mut handle = world.handle.lock().unwrap();
             handle.destroy().map_err(map_sandbox_error)?;
         }
         Ok(())

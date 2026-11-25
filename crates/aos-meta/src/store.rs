@@ -255,12 +255,15 @@ pub(crate) fn idem_prepare(
     .transpose()
 }
 
-pub(crate) fn idem_lookup(
-    t: &RawTable<'_>,
+pub(crate) fn idem_lookup<Tbl>(
+    t: &Tbl,
     idem: Option<&IdempotencyKey>,
     op: &str,
     digest: Option<&[u8; 32]>,
-) -> Result<Option<IdemResponse>> {
+) -> Result<Option<IdemResponse>>
+where
+    Tbl: ReadableTable<&'static str, &'static [u8]>,
+{
     match (idem, digest) {
         (Some(k), Some(d)) => check_replay(tables::load_idem(t, k)?, k, op, d),
         _ => Ok(None),
@@ -364,7 +367,7 @@ impl MetaEngine {
         self.clock.now_ms()
     }
 
-    fn read_table<T>(
+    pub(crate) fn read_table<T>(
         &self,
         def: tables::Def,
         f: impl FnOnce(&redb::ReadOnlyTable<&'static str, &'static [u8]>) -> Result<T>,

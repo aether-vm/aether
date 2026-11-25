@@ -83,8 +83,8 @@ struct AgentdInner {
     idem_locks: Mutex<HashMap<IdemKey, Arc<AsyncMutex<()>>>>,
     /// Full RPC request digests keyed by `(owner, request_id)` -> `(op_name, blake3_digest)`.
     idem_digests: Mutex<HashMap<IdemKey, (&'static str, [u8; 32])>>,
-    /// Successful `CreateWorld` idempotency table keyed by `(owner, request_id)` -> `(digest, world_id)`.
-    world_idem_cache: Mutex<HashMap<IdemKey, ([u8; 32], WorldId)>>,
+    /// Number of in-flight operations per world; see [`WorldOp`].
+    busy_worlds: Mutex<HashMap<WorldId, usize>>,
     /// World-lifetime Exec dedup cache keyed by `(world_id, owner, request_id)` (ARCHITECTURE_V2 §7.2).
     exec_cache: Mutex<HashMap<(WorldId, String, String), CachedExec>>,
     exec_seq: AtomicU64,
@@ -95,6 +95,37 @@ struct AgentdInner {
     /// Active gateway slot binding per running world.
     world_slots: Mutex<HashMap<WorldId, SlotId>>,
     next_slot_id: AtomicU64,
+}
+
+/// Keeps the lease reaper away from a world while an operation on it is in flight.
+///
+/// Must be taken under the `meta` lock that validated the operation; the reaper looks at
+/// `busy_worlds` under that same lock.
+struct WorldOp {
+    inner: Arc<AgentdInner>,
+    world: WorldId,
+}
+
+impl WorldOp {
+    fn begin(inner: &Arc<AgentdInner>, world: WorldId) -> Self {
+        *inner.busy_worlds.lock().unwrap().entry(world).or_default() += 1;
+        Self {
+            inner: inner.clone(),
+            world,
+        }
+    }
+}
+
+impl Drop for WorldOp {
+    fn drop(&mut self) {
+        let mut busy = self.inner.busy_worlds.lock().unwrap();
+        if let Some(n) = busy.get_mut(&self.world) {
+            *n -= 1;
+            if *n == 0 {
+                busy.remove(&self.world);
+            }
+        }
+    }
 }
 
 /// Shared gRPC control-plane service implementing `SystemService`, `FrameService`, and `WorldService`.
@@ -130,7 +161,7 @@ impl AgentdService {
                 live_worlds: Mutex::new(HashMap::new()),
                 idem_locks: Mutex::new(HashMap::new()),
                 idem_digests: Mutex::new(HashMap::new()),
-                world_idem_cache: Mutex::new(HashMap::new()),
+                busy_worlds: Mutex::new(HashMap::new()),
                 exec_cache: Mutex::new(HashMap::new()),
                 exec_seq: AtomicU64::new(1),
                 gateway_fence: Arc::new(EpochFenceRegistry::new(initial_epoch)),
@@ -203,6 +234,51 @@ impl AgentdService {
             .unwrap()
             .insert(world_id, slot_id);
         Ok(binding)
+    }
+
+    /// End every world whose lease ran out and tear down its sandbox, rootfs and gateway binding.
+    ///
+    /// Worlds with an in-flight `CreateWorld`, `Exec` or `Checkpoint` are postponed until it ends.
+    pub fn reap_expired_worlds(&self) -> Result<Vec<WorldId>, aos_meta::MetaError> {
+        let expired = {
+            let mut meta = self.inner.meta.lock().unwrap();
+            let busy = self.inner.busy_worlds.lock().unwrap();
+            meta.expire_idle_world_leases(|w| busy.contains_key(w))?
+        };
+        for wid in &expired {
+            self.teardown_world(*wid);
+        }
+        Ok(expired)
+    }
+
+    /// Release everything a world that already ended in `meta` still occupies.
+    fn teardown_world(&self, wid: WorldId) {
+        if let Err(e) = self.inner.sandbox.destroy_world(wid) {
+            tracing::warn!("destroying sandbox of world {wid} failed: {e}");
+        }
+        let live = self.inner.live_worlds.lock().unwrap().remove(&wid);
+        if let Some(live) = live
+            && let Err(e) = self.inner.tree.destroy_subvolume(&live.rootfs_path)
+        {
+            tracing::warn!("destroying rootfs of world {wid} failed: {e}");
+        }
+        if let Some(slot_id) = self.inner.world_slots.lock().unwrap().remove(&wid) {
+            self.inner.gateway_fence.revoke_slot(&slot_id);
+        }
+        self.inner.gateway_fence.revoke_world(wid);
+        if let Some(ref audit) = self.inner.audit_store {
+            match audit.crypto_shred(wid) {
+                Ok(()) | Err(GwError::AuditKeyMissing { .. }) => {}
+                Err(e) => {
+                    tracing::warn!("audit crypto_shred for world {wid} returned error: {e}");
+                }
+            }
+        }
+        self.inner
+            .exec_cache
+            .lock()
+            .unwrap()
+            .retain(|(w, _, _), _| *w != wid);
     }
 
     async fn lock_idem(&self, idem: Option<&MetaIdempotencyKey>) -> Option<OwnedMutexGuard<()>> {
@@ -1228,44 +1304,32 @@ impl WorldService for AgentdService {
             create_world_request_digest(&req.owner, base_frame, driver, &labels, lease_ttl_ms);
         self.check_idem_digest(idem.as_ref(), &req.owner, "create_world", full_digest)?;
 
-        // Check idempotent replay BEFORE validating driver / creating world.
+        let driver_name = match driver {
+            DriverKind::Namespace | DriverKind::Unspecified => "namespace",
+            DriverKind::Firecracker => "firecracker",
+        };
+        let meta_req = MetaCreateWorldRequest {
+            owner: req.owner.clone(),
+            base_frame,
+            labels,
+            lease_ttl_ms,
+            driver: driver_name.to_owned(),
+        };
+
+        // Durable idempotent replay BEFORE validating driver / creating world. After a daemon
+        // restart this returns the original world in its current (`Lost`) state.
         if let Some(ref k) = idem {
-            let cached_wid = self
-                .inner
-                .world_idem_cache
-                .lock()
-                .unwrap()
-                .get(&(k.owner.clone(), k.request_id.clone()))
-                .copied();
-            if let Some((saved_digest, wid)) = cached_wid {
-                if saved_digest != full_digest {
-                    return Err(simple_status(
-                        Code::AlreadyExists,
-                        ErrorCode::IdempotencyConflict,
-                        format!(
-                            "CreateWorld request_id {:?} reused with different parameters",
-                            k.request_id
-                        ),
-                        k.request_id.clone(),
-                    ));
-                }
-                let meta = self.inner.meta.lock().unwrap();
-                let mut rec = meta
-                    .world(wid)
-                    .map_err(map_meta_error)?
-                    .ok_or_else(|| map_meta_error(aos_meta::MetaError::WorldNotFound(wid)))?;
-                rec.fencing_token = MetaFencingToken::FIRST;
+            let meta = self.inner.meta.lock().unwrap();
+            let replayed = meta
+                .replay_create_world(&meta_req, k)
+                .map_err(map_meta_error)?;
+            if let Some(rec) = replayed {
                 let info = self.world_to_proto(&rec);
                 return Ok(Response::new(CreateWorldResponse { world: Some(info) }));
             }
         }
 
-        // Validate driver is enabled BEFORE calling meta.create_world so a failed spawn
-        // never poisons redb TBL_IDEMPOTENCY with a Destroyed world.
-        let driver_name = match driver {
-            DriverKind::Namespace | DriverKind::Unspecified => "namespace",
-            DriverKind::Firecracker => "firecracker",
-        };
+        // Validate driver is enabled BEFORE calling meta.create_world.
         if !self
             .inner
             .sandbox
@@ -1279,7 +1343,7 @@ impl WorldService for AgentdService {
             .into());
         }
 
-        let (world_rec, base_subvol_path) = {
+        let (world_rec, base_subvol_path, _op) = {
             let mut meta = self.inner.meta.lock().unwrap();
             let base_rec = meta
                 .frame(base_frame)
@@ -1300,17 +1364,17 @@ impl WorldService for AgentdService {
                 })?;
             let subvol_path = meta.config().objects_dir().join(subvol.name());
             let rec = meta
-                .create_world(
-                    &MetaCreateWorldRequest {
-                        owner: req.owner.clone(),
-                        base_frame,
-                        labels,
-                        lease_ttl_ms,
-                    },
-                    None,
-                )
+                .create_world(&meta_req, idem.as_ref())
                 .map_err(map_meta_error)?;
-            (rec, subvol_path)
+            let op = WorldOp::begin(&self.inner, rec.world_id);
+            (rec, subvol_path, op)
+        };
+        // A world whose sandbox did not come up must not be what the key replays to.
+        let abort = || {
+            let mut meta = self.inner.meta.lock().unwrap();
+            if let Err(e) = meta.abort_create_world(world_rec.world_id, &req.owner, idem.as_ref()) {
+                tracing::warn!("aborting world {} failed: {e}", world_rec.world_id);
+            }
         };
 
         let rootfs_path = match self
@@ -1320,13 +1384,7 @@ impl WorldService for AgentdService {
         {
             Ok(p) => p,
             Err(e) => {
-                let mut meta = self.inner.meta.lock().unwrap();
-                let _ = meta.destroy_world(
-                    world_rec.world_id,
-                    &req.owner,
-                    world_rec.fencing_token,
-                    None,
-                );
+                abort();
                 return Err(e.into());
             }
         };
@@ -1336,13 +1394,7 @@ impl WorldService for AgentdService {
             rootfs_path: rootfs_path.clone(),
         }) {
             let _ = self.inner.tree.destroy_subvolume(&rootfs_path);
-            let mut meta = self.inner.meta.lock().unwrap();
-            let _ = meta.destroy_world(
-                world_rec.world_id,
-                &req.owner,
-                world_rec.fencing_token,
-                None,
-            );
+            abort();
             return Err(e.into());
         }
         if let Err(e) =
@@ -1350,13 +1402,7 @@ impl WorldService for AgentdService {
         {
             let _ = self.inner.sandbox.destroy_world(world_rec.world_id);
             let _ = self.inner.tree.destroy_subvolume(&rootfs_path);
-            let mut meta = self.inner.meta.lock().unwrap();
-            let _ = meta.destroy_world(
-                world_rec.world_id,
-                &req.owner,
-                world_rec.fencing_token,
-                None,
-            );
+            abort();
             return Err(e);
         }
         if let Some(ref audit) = self.inner.audit_store {
@@ -1370,13 +1416,7 @@ impl WorldService for AgentdService {
                 lease_ttl_ms,
             },
         );
-        if let Some(ref k) = idem {
-            self.store_idem_digest(idem.as_ref(), "create_world", full_digest);
-            self.inner.world_idem_cache.lock().unwrap().insert(
-                (k.owner.clone(), k.request_id.clone()),
-                (full_digest, world_rec.world_id),
-            );
-        }
+        self.store_idem_digest(idem.as_ref(), "create_world", full_digest);
 
         let info = self.world_to_proto(&world_rec);
         Ok(Response::new(CreateWorldResponse { world: Some(info) }))
@@ -1422,27 +1462,7 @@ impl WorldService for AgentdService {
                 .map_err(map_meta_error)?
         };
 
-        let _ = self.inner.sandbox.destroy_world(wid);
-        if let Some(live) = self.inner.live_worlds.lock().unwrap().remove(&wid) {
-            let _ = self.inner.tree.destroy_subvolume(&live.rootfs_path);
-        }
-        if let Some(slot_id) = self.inner.world_slots.lock().unwrap().remove(&wid) {
-            self.inner.gateway_fence.revoke_slot(&slot_id);
-        }
-        self.inner.gateway_fence.revoke_world(wid);
-        if let Some(ref audit) = self.inner.audit_store {
-            match audit.crypto_shred(wid) {
-                Ok(()) | Err(GwError::AuditKeyMissing { .. }) => {}
-                Err(e) => {
-                    tracing::warn!("audit crypto_shred for world {wid} returned error: {e}");
-                }
-            }
-        }
-        self.inner
-            .exec_cache
-            .lock()
-            .unwrap()
-            .retain(|(w, _, _), _| *w != wid);
+        self.teardown_world(wid);
 
         let info = self.world_to_proto(&rec);
         Ok(Response::new(DestroyWorldResponse { world: Some(info) }))
@@ -1507,12 +1527,13 @@ impl WorldService for AgentdService {
         let has_idem = idem.is_some();
 
         // Check WorldLost / OutcomeUnknown first (ARCHITECTURE_V2 §7.2: never auto-replay across restart!).
-        {
+        let op = {
             let meta = self.inner.meta.lock().unwrap();
             Self::check_not_lost(&meta, wid, has_idem)?;
             meta.check_world_mutation(wid, &req.owner, token)
                 .map_err(map_meta_error)?;
-        }
+            WorldOp::begin(&self.inner, wid)
+        };
 
         let digest = exec_request_digest(&req);
         let idem_guard = self.lock_idem(idem.as_ref()).await;
@@ -1580,6 +1601,7 @@ impl WorldService for AgentdService {
 
         tokio::spawn(async move {
             let _hold_idem_guard = idem_guard;
+            let _op = op;
             let fwd_tx = tx.clone();
             let forwarder = tokio::spawn(async move {
                 while let Some(c) = chunk_rx.recv().await {
@@ -1668,7 +1690,7 @@ impl WorldService for AgentdService {
         );
         self.check_idem_digest(idem.as_ref(), &req.owner, "checkpoint", full_digest)?;
 
-        let (prepared, target_path, live_rootfs, newly_created) = {
+        let (prepared, target_path, live_rootfs, newly_created, _op) = {
             let mut meta = self.inner.meta.lock().unwrap();
             Self::check_not_lost(&meta, wid, false)?;
             let world_rec = meta
@@ -1720,7 +1742,7 @@ impl WorldService for AgentdService {
             let obj = prep.expected_objects[0];
             let path = meta.config().objects_dir().join(obj.name());
             let is_new = !before_ids.contains(&prep.frame_id);
-            (prep, path, live_rootfs, is_new)
+            (prep, path, live_rootfs, is_new, WorldOp::begin(&self.inner, wid))
         };
 
         // Check idempotent replay of an already-existing checkpoint.

@@ -368,13 +368,7 @@ fn run_aos(aos_bin: &Path, sock: &Path, args: &[&str]) -> (bool, String, String)
     )
 }
 
-#[test]
-fn live_linux_btrfs_namespace_agentd_and_aos_cli_cold_fork_e2e() {
-    let Some(mut h) = E2eHarness::new() else {
-        return;
-    };
-
-    let agentd_bin = PathBuf::from(env!("CARGO_BIN_EXE_agentd"));
+fn build_aos() -> PathBuf {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -389,6 +383,152 @@ fn live_linux_btrfs_namespace_agentd_and_aos_cli_cold_fork_e2e() {
     assert!(st.success(), "building aos-cli failed");
     let aos_bin = workspace_root.join("target/debug/aos");
     assert!(aos_bin.is_file(), "aos binary not found at {:?}", aos_bin);
+    aos_bin
+}
+
+/// Start `agentd`, import the rootfs and return `(aos binary, base frame id)`.
+fn start_with_base_frame(h: &mut E2eHarness) -> (PathBuf, String) {
+    let aos = build_aos();
+    let tar_path = prepare_clean_rootfs_tar(&h.base_dir);
+    h.start_agentd(&PathBuf::from(env!("CARGO_BIN_EXE_agentd")));
+    let (ok, out, err) = run_aos(
+        &aos,
+        &h.sock_path,
+        &["--json", "frame", "import", tar_path.to_str().unwrap()],
+    );
+    assert!(ok, "aos frame import failed: {err}");
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    (aos, json["frame_id"].as_str().unwrap().to_owned())
+}
+
+/// Create a world and return `(world id, fencing token)`.
+fn create_world(aos: &Path, h: &E2eHarness, base: &str, lease_ttl_ms: &str) -> (String, String) {
+    let (ok, out, err) = run_aos(
+        aos,
+        &h.sock_path,
+        &["--json", "world", "create", "--base", base, "--lease-ttl-ms", lease_ttl_ms],
+    );
+    assert!(ok, "aos world create failed: {err}");
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    (
+        json["world_id"].as_str().unwrap().to_owned(),
+        json["fencing_token"].as_u64().unwrap().to_string(),
+    )
+}
+
+fn spawn_exec(aos: &Path, h: &E2eHarness, wid: &str, fence: &str, script: &str) -> Child {
+    Command::new(aos)
+        .arg("--socket")
+        .arg(&h.sock_path)
+        .args(["--owner", "e2e", "world", "exec", wid, "--fence", fence])
+        .args(["--timeout-ms", "30000", "--", "/bin/sh", "-c", script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn aos world exec")
+}
+
+fn wait_until(what: &str, secs: u64, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    while !cond() {
+        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn live_expired_world_lease_is_reaped_but_not_during_an_inflight_exec() {
+    let Some(mut h) = E2eHarness::new() else {
+        return;
+    };
+    let (aos, base) = start_with_base_frame(&mut h);
+    let epoch = h.cgroup_root.join("epoch-1");
+    let cg = |w: &str| epoch.join(format!("w-{w}"));
+    let subvol = |h: &E2eHarness, w: &str| h.pool_dir.join("worlds").join(format!("w-{w}"));
+
+    let (idle, _) = create_world(&aos, &h, &base, "1500");
+    let (busy, busy_fence) = create_world(&aos, &h, &base, "1500");
+    let (kept, kept_fence) = create_world(&aos, &h, &base, "600000");
+    let exec = spawn_exec(&aos, &h, &busy, &busy_fence, "sleep 6; echo finished");
+
+    wait_until("idle world reaped", 5, || {
+        !cg(&idle).exists() && !subvol(&h, &idle).exists()
+    });
+    let (ok, out, _) = run_aos(&aos, &h.sock_path, &["--json", "world", "get", &idle]);
+    assert!(ok && out.contains("LeaseExpired"), "idle world tombstone: {out}");
+    assert!(cg(&busy).exists(), "a world with an in-flight Exec must not be reaped");
+
+    let res = exec.wait_with_output().unwrap();
+    assert!(
+        res.status.success() && String::from_utf8_lossy(&res.stdout).contains("finished"),
+        "in-flight Exec must run to completion: {res:?}"
+    );
+    wait_until("busy world reaped after its Exec", 5, || {
+        !cg(&busy).exists() && !subvol(&h, &busy).exists()
+    });
+
+    // A live lease is untouched.
+    let (ok, _, err) = run_aos(
+        &aos,
+        &h.sock_path,
+        &["world", "exec", &kept, "--fence", &kept_fence, "--", "/bin/sh", "-c", ":"],
+    );
+    assert!(ok, "world with a live lease must stay usable: {err}");
+}
+
+#[test]
+fn live_destroy_interrupts_inflight_exec_without_blocking_other_worlds() {
+    let Some(mut h) = E2eHarness::new() else {
+        return;
+    };
+    let (aos, base) = start_with_base_frame(&mut h);
+    let (wid, fence) = create_world(&aos, &h, &base, "600000");
+    let (other, other_fence) = create_world(&aos, &h, &base, "600000");
+    let cg = h.cgroup_root.join("epoch-1").join(format!("w-{wid}"));
+    let exec = spawn_exec(&aos, &h, &wid, &fence, "sleep 20");
+    wait_until("exec running", 5, || {
+        fs::read_to_string(cg.join("exec/cgroup.procs")).is_ok_and(|p| !p.is_empty())
+    });
+
+    let start = std::time::Instant::now();
+    let destroy = Command::new(&aos)
+        .arg("--socket")
+        .arg(&h.sock_path)
+        .args(["--owner", "e2e", "world", "destroy", &wid, "--fence", &fence])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let (ok, _, err) = run_aos(
+        &aos,
+        &h.sock_path,
+        &["world", "exec", &other, "--fence", &other_fence, "--", "/bin/sh", "-c", ":"],
+    );
+    assert!(ok, "other world failed: {err}");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "destroying one world blocked another for {:?}",
+        start.elapsed()
+    );
+    assert!(destroy.wait_with_output().unwrap().status.success());
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "destroy waited {:?} for the in-flight Exec",
+        start.elapsed()
+    );
+    assert!(!cg.exists());
+    assert!(!exec.wait_with_output().unwrap().status.success());
+}
+
+#[test]
+fn live_linux_btrfs_namespace_agentd_and_aos_cli_cold_fork_e2e() {
+    let Some(mut h) = E2eHarness::new() else {
+        return;
+    };
+
+    let agentd_bin = PathBuf::from(env!("CARGO_BIN_EXE_agentd"));
+    let aos_bin = build_aos();
 
     let tar_path = prepare_clean_rootfs_tar(&h.base_dir);
     h.start_agentd(&agentd_bin);

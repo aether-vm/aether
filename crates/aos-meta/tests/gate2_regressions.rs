@@ -250,6 +250,7 @@ fn p0_5_preflight_check_guarantees_zero_mutation_before_r1_r2_r3_r5() {
                 base_frame: committed,
                 labels: labels(&[("env", "prod")]),
                 lease_ttl_ms: 10_000,
+                driver: "namespace".into(),
             },
             None,
         )
@@ -497,6 +498,7 @@ fn p1_2_frame_ownership_acls_and_ttl_bounds() {
                 base_frame: f_alice,
                 labels: Default::default(),
                 lease_ttl_ms: 1_000,
+                driver: "namespace".into(),
             },
             None
         ),
@@ -511,6 +513,7 @@ fn p1_2_frame_ownership_acls_and_ttl_bounds() {
                     base_frame: f_alice,
                     labels: Default::default(),
                     lease_ttl_ms: bad_ttl,
+                    driver: "namespace".into(),
                 },
                 None
             ),
@@ -532,6 +535,7 @@ fn p1_3_create_world_replay_never_leaks_post_takeover_fencing_token() {
         base_frame: f,
         labels: Default::default(),
         lease_ttl_ms: 10_000,
+        driver: "namespace".into(),
     };
 
     let created = e.create_world(&req, Some(&key)).unwrap();
@@ -581,6 +585,7 @@ fn p1_4_prepare_commit_and_acquire_fence_require_running_world_and_live_lease() 
                 base_frame: base,
                 labels: Default::default(),
                 lease_ttl_ms: 10_000,
+                driver: "namespace".into(),
             },
             None,
         )
@@ -619,6 +624,7 @@ fn p1_4_prepare_commit_and_acquire_fence_require_running_world_and_live_lease() 
                 base_frame: base,
                 labels: Default::default(),
                 lease_ttl_ms: 1_000,
+                driver: "namespace".into(),
             },
             None,
         )

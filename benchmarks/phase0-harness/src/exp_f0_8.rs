@@ -699,6 +699,7 @@ pub fn run_worker(args: &WorkerArgs) -> Result<()> {
                             base_frame: fid,
                             labels,
                             lease_ttl_ms: 60_000,
+                            driver: "namespace".into(),
                         },
                         None,
                     )

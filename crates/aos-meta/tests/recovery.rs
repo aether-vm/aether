@@ -56,6 +56,7 @@ fn boot_change_expires_every_volatile_frame_and_its_holds() {
                 base_frame: v2,
                 labels: labels(&[("job", "mcts")]),
                 lease_ttl_ms: 10_000,
+                driver: "namespace".into(),
             },
             None,
         )
@@ -125,6 +126,7 @@ fn gateway_fence_failure_aborts_before_any_world_is_touched() {
                 base_frame: f,
                 labels: labels(&[("team", "rl")]),
                 lease_ttl_ms: 10_000,
+                driver: "namespace".into(),
             },
             None,
         )
@@ -182,6 +184,7 @@ fn old_epoch_worlds_become_lost_release_holds_and_keep_a_tombstone() {
                 base_frame: f,
                 labels: labels(&[("team", "rl"), ("run", "7")]),
                 lease_ttl_ms: 10_000,
+                driver: "namespace".into(),
             },
             None,
         )

@@ -13,8 +13,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use agentd::backend::{build_ustar_archive, InMemorySandboxBackend, LocalDevTreeBackend};
-use agentd::error::decode_error_detail;
+use agentd::backend::{
+    build_ustar_archive, InMemorySandboxBackend, LocalDevTreeBackend, SandboxBackend,
+    SandboxExecRequest, SandboxExecResult, SandboxOutputChunk, SpawnWorldSpec,
+};
+use agentd::error::{decode_error_detail, BackendError};
 use agentd::proto::frame_service_server::FrameService;
 use agentd::proto::system_service_server::SystemService;
 use agentd::proto::world_service_server::WorldService;
@@ -28,7 +31,7 @@ use agentd::proto::{
 };
 use agentd::service::AgentdService;
 use aos_meta::{FsArtifactBackend, ManualClock, MetaConfig, MetaEngine};
-use aos_types::BootId;
+use aos_types::{BootId, WorldId};
 use tokio_stream::StreamExt;
 use tonic::Request;
 
@@ -65,6 +68,10 @@ impl TestEnv {
     }
 
     fn boot_service(&self) -> AgentdService {
+        self.boot_service_with(Arc::new(InMemorySandboxBackend::new()))
+    }
+
+    fn boot_service_with(&self, sandbox: Arc<dyn SandboxBackend>) -> AgentdService {
         let boot = BootId::parse(TEST_BOOT).unwrap();
         let (engine, _) = MetaEngine::open_and_recover(
             self.cfg.clone(),
@@ -74,7 +81,6 @@ impl TestEnv {
         )
         .expect("open_and_recover");
         let tree = Arc::new(LocalDevTreeBackend::new(self.root.join("worlds")));
-        let sandbox = Arc::new(InMemorySandboxBackend::new());
         AgentdService::new(engine, tree, sandbox)
     }
 }
@@ -1060,4 +1066,164 @@ async fn uds_transport_enforces_0600_perms_and_serves_grpc_end_to_end() {
         sym_err.to_string().contains("symlinked socket parent"),
         "expected symlinked parent rejection, got: {sym_err:#}"
     );
+}
+
+/// Fails the first `spawn_world`, then behaves like [`InMemorySandboxBackend`].
+#[derive(Default)]
+struct FailFirstSpawn {
+    inner: InMemorySandboxBackend,
+    failed: std::sync::atomic::AtomicBool,
+}
+
+impl SandboxBackend for FailFirstSpawn {
+    fn enabled_drivers(&self) -> Vec<String> {
+        self.inner.enabled_drivers()
+    }
+    fn spawn_world(&self, spec: SpawnWorldSpec) -> Result<(), BackendError> {
+        if !self.failed.swap(true, Ordering::SeqCst) {
+            return Err(BackendError::Internal("injected spawn failure".into()));
+        }
+        self.inner.spawn_world(spec)
+    }
+    fn exec(
+        &self,
+        world_id: WorldId,
+        req: SandboxExecRequest,
+        tx: tokio::sync::mpsc::Sender<SandboxOutputChunk>,
+    ) -> Result<SandboxExecResult, BackendError> {
+        self.inner.exec(world_id, req, tx)
+    }
+    fn freeze_and_sync(&self, world_id: WorldId, sync: bool) -> Result<bool, BackendError> {
+        self.inner.freeze_and_sync(world_id, sync)
+    }
+    fn unfreeze(&self, world_id: WorldId) -> Result<(), BackendError> {
+        self.inner.unfreeze(world_id)
+    }
+    fn destroy_world(&self, world_id: WorldId) -> Result<(), BackendError> {
+        self.inner.destroy_world(world_id)
+    }
+}
+
+async fn import_base(svc: &AgentdService, owner: &str) -> String {
+    import_tar_over_duplex(
+        svc,
+        ImportTarHeader {
+            owner: owner.into(),
+            durability: FrameDurability::Durable as i32,
+            ..Default::default()
+        },
+        build_ustar_archive(&[("app.txt", b"ok\n")]),
+    )
+    .await
+    .unwrap()
+    .frame
+    .unwrap()
+    .frame_id
+}
+
+fn keyed_create(base: &str, request_id: &str) -> CreateWorldRequest {
+    CreateWorldRequest {
+        owner: "bob".into(),
+        base_frame_id: base.into(),
+        driver: DriverKind::Namespace as i32,
+        lease_ttl_ms: 60_000,
+        idempotency_key: Some(IdempotencyKey {
+            owner: "bob".into(),
+            request_id: request_id.into(),
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn create_world_replay_after_restart_returns_the_original_world() {
+    let env = TestEnv::new("create-replay");
+    let svc1 = env.boot_service();
+    let base = import_base(&svc1, "bob").await;
+    let req = keyed_create(&base, "cw-1");
+    let first = svc1
+        .create_world(Request::new(req.clone()))
+        .await
+        .unwrap()
+        .into_inner()
+        .world
+        .unwrap();
+
+    drop(svc1);
+    let svc2 = env.boot_service();
+    let replay = svc2
+        .create_world(Request::new(req.clone()))
+        .await
+        .unwrap()
+        .into_inner()
+        .world
+        .unwrap();
+    assert_eq!(replay.world_id, first.world_id, "replay must not create a second world");
+    assert_eq!(replay.state, WorldStateKind::WorldStateLost as i32);
+
+    // The key still protects against reuse with other parameters, including the driver.
+    for changed in [
+        CreateWorldRequest {
+            lease_ttl_ms: 61_000,
+            ..req.clone()
+        },
+        CreateWorldRequest {
+            driver: DriverKind::Firecracker as i32,
+            ..req.clone()
+        },
+    ] {
+        let err = svc2.create_world(Request::new(changed)).await.unwrap_err();
+        assert_eq!(
+            decode_error_detail(&err).unwrap().code,
+            ErrorCode::IdempotencyConflict as i32
+        );
+    }
+
+    // A fresh key creates a fresh, usable world.
+    let fresh = svc2
+        .create_world(Request::new(keyed_create(&base, "cw-2")))
+        .await
+        .unwrap()
+        .into_inner()
+        .world
+        .unwrap();
+    assert_ne!(fresh.world_id, first.world_id);
+    assert_eq!(fresh.state, WorldStateKind::WorldStateRunning as i32);
+}
+
+#[tokio::test]
+async fn failed_spawn_does_not_consume_the_create_world_key() {
+    let env = TestEnv::new("create-fail");
+    let svc1 = env.boot_service_with(Arc::new(FailFirstSpawn::default()));
+    let base = import_base(&svc1, "bob").await;
+    let req = keyed_create(&base, "cw-1");
+    svc1.create_world(Request::new(req.clone()))
+        .await
+        .expect_err("injected spawn failure");
+    // Neither the same daemon nor a restarted one may replay the failed attempt.
+    let ok = svc1
+        .create_world(Request::new(req.clone()))
+        .await
+        .unwrap()
+        .into_inner()
+        .world
+        .unwrap();
+    assert_eq!(ok.state, WorldStateKind::WorldStateRunning as i32);
+    drop(svc1);
+
+    let svc2 = env.boot_service_with(Arc::new(FailFirstSpawn::default()));
+    let req = keyed_create(&base, "cw-2");
+    svc2.create_world(Request::new(req.clone()))
+        .await
+        .expect_err("injected spawn failure");
+    drop(svc2);
+    let ok = env
+        .boot_service()
+        .create_world(Request::new(req))
+        .await
+        .unwrap()
+        .into_inner()
+        .world
+        .unwrap();
+    assert_eq!(ok.state, WorldStateKind::WorldStateRunning as i32);
 }

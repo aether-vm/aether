@@ -15,6 +15,7 @@ fn world_req(base: FrameId, pairs: &[(&str, &str)]) -> CreateWorldRequest {
         base_frame: base,
         labels: labels(pairs),
         lease_ttl_ms: 1_000,
+        driver: "namespace".into(),
     }
 }
 
