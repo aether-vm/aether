@@ -542,7 +542,7 @@ impl MetaEngine {
         let objects = self.cfg.objects_dir();
         for o in &orphans {
             let (from, to) = (objects.join(o), qdir.join(o));
-            fs::rename(&from, &to).map_err(|e| {
+            self.hooks.quarantine_object(&from, &to).map_err(|e| {
                 MetaError::io(format!("quarantining {} -> {}", from.display(), to.display()), e)
             })?;
         }

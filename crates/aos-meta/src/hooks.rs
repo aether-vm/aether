@@ -26,6 +26,11 @@ pub trait RecoveryHooks: Send {
     /// Destroy a volatile (tmpfs) object.
     fn destroy_volatile_object(&mut self, object: &ManagedObject) -> io::Result<()>;
 
+    /// R6: move an orphaned pool object into the quarantine directory.
+    fn quarantine_object(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
     /// Physically purge a quarantined entry whose grace period has elapsed.
     fn purge_quarantined(&mut self, path: &Path) -> io::Result<()> {
         remove_path(path)

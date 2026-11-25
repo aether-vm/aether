@@ -536,6 +536,82 @@ fn live_destroy_interrupts_inflight_exec_without_blocking_other_worlds() {
 }
 
 #[test]
+fn live_quarantined_btrfs_orphans_are_purged_only_after_their_grace_period() {
+    use agentd::backend::ProductionRecoveryHooks;
+    use aos_meta::{Clock, ManualClock, MetaConfig, MetaEngine};
+    use aos_store::{TreeStore, TreeStoreConfig};
+    use std::sync::Arc;
+
+    let Some(h) = E2eHarness::new() else {
+        return;
+    };
+    let clock = Arc::new(ManualClock::new(1_760_000_000_000));
+    let open = || {
+        let store = TreeStore::open(TreeStoreConfig::new(&h.pool_dir).with_ballast_bytes(1 << 20));
+        let store = store.unwrap();
+        let hooks = ProductionRecoveryHooks::new(store, &h.tmpfs_dir, &h.cgroup_root);
+        let mut cfg = MetaConfig::new(&h.meta_dir, &h.pool_dir);
+        cfg.max_small_pool_orphans = 10;
+        let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+        let boot = aos_types::BootId::parse(boot.trim()).unwrap();
+        MetaEngine::open_and_recover(cfg, boot, Box::new(hooks), clock.clone()).unwrap()
+    };
+    drop(open());
+
+    let objects = h.pool_dir.join("objects");
+    let btrfs = |args: &[&str], path: &Path| {
+        let st = Command::new("btrfs").args(args).arg(path).stdout(Stdio::null()).status();
+        assert!(st.unwrap().success(), "btrfs {args:?}");
+    };
+    for (name, sealed) in [("orphan-rw", false), ("orphan-ro", true)] {
+        let sv = objects.join(name);
+        btrfs(&["subvolume", "create"], &sv);
+        fs::write(sv.join("f"), b"x").unwrap();
+        if sealed {
+            let st = Command::new("btrfs")
+                .args(["property", "set", "-ts"])
+                .arg(&sv)
+                .args(["ro", "true"])
+                .status();
+            assert!(st.unwrap().success());
+        }
+    }
+    fs::create_dir_all(objects.join("orphan-dir/sub")).unwrap();
+    fs::write(objects.join("orphan-file"), b"x").unwrap();
+    let outside = h.base_dir.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("precious"), b"x").unwrap();
+    std::os::unix::fs::symlink(&outside, objects.join("orphan-link")).unwrap();
+
+    let (mut e, summary) = open();
+    assert_eq!(summary.orphans_quarantined, 5);
+    let quarantined = || {
+        let q = h.pool_dir.join("quarantine");
+        fs::read_dir(q)
+            .unwrap()
+            .flatten()
+            .flat_map(|d| fs::read_dir(d.path()).unwrap().flatten().collect::<Vec<_>>())
+            .count()
+    };
+    assert_eq!(quarantined(), 5);
+    let ro = Command::new("btrfs")
+        .args(["property", "get", "-ts"])
+        .arg(h.pool_dir.join("quarantine/epoch-2/orphan-ro"))
+        .arg("ro")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&ro.stdout).trim(), "ro=true", "stays sealed");
+
+    clock.advance(e.config().quarantine_grace_ms - 1);
+    assert_eq!(e.collect_garbage(clock.now_ms()).unwrap().quarantine_purged, 0);
+    assert_eq!(quarantined(), 5);
+    clock.advance(1);
+    assert_eq!(e.collect_garbage(clock.now_ms()).unwrap().quarantine_purged, 5);
+    assert_eq!(quarantined(), 0);
+    assert!(outside.join("precious").exists(), "a quarantined symlink must not be followed");
+}
+
+#[test]
 fn live_linux_btrfs_namespace_agentd_and_aos_cli_cold_fork_e2e() {
     let Some(mut h) = E2eHarness::new() else {
         return;

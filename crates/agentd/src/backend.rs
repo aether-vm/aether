@@ -1075,6 +1075,10 @@ impl RecoveryHooks for ProductionRecoveryHooks {
         self.tree_hooks.destroy_volatile_object(object)
     }
 
+    fn quarantine_object(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+        self.tree_hooks.quarantine_object(from, to)
+    }
+
     fn purge_quarantined(&mut self, path: &Path) -> io::Result<()> {
         self.tree_hooks.purge_quarantined(path)
     }

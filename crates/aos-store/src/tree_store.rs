@@ -891,6 +891,23 @@ impl RecoveryHooks for TreeStoreRecoveryHooks {
         aos_meta::hooks::remove_path(&self.volatile_root.join(object.name()))
     }
 
+    /// A sealed subvolume cannot be renamed into another directory while it is read-only.
+    fn quarantine_object(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use crate::btrfs::linux_impl as btrfs;
+            if self.store.btrfs_backed && btrfs::is_btrfs_subvolume(from)? {
+                let subvol = btrfs::open_dir_nofollow(from)?;
+                let flags = btrfs::btrfs_subvol_getflags(&subvol)?;
+                btrfs::btrfs_subvol_set_readonly(&subvol, false)?;
+                let moved = fs::rename(from, to);
+                btrfs::btrfs_subvol_setflags(&subvol, flags)?;
+                return moved;
+            }
+        }
+        fs::rename(from, to)
+    }
+
     fn purge_quarantined(&mut self, path: &Path) -> io::Result<()> {
         self.store
             .destroy_subvolume(path)
