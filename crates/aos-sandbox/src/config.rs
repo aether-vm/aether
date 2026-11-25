@@ -18,6 +18,14 @@ pub const DEFAULT_CGROUP_SLICE_ROOT: &str = "/sys/fs/cgroup/forkloom.slice";
 /// Default handshake timeout waiting for the spawned `aos-guest` `Pong`.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Default first host UID/GID backing sandbox ids when `agentd` runs as root.
+///
+/// `0x7000_0000` lies above the systemd container range and the usual `/etc/subuid` allocations.
+pub const DEFAULT_USERNS_HOST_BASE: u32 = 0x7000_0000;
+
+/// Number of sandbox UIDs/GIDs mapped from [`DEFAULT_USERNS_HOST_BASE`].
+pub const DEFAULT_USERNS_ID_COUNT: u32 = 65_536;
+
 /// Single UID/GID mapping entry for Linux user namespaces (`<inside> <outside> <count>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdMapRange {
@@ -96,9 +104,11 @@ pub struct SpawnWorldSpec {
     pub enable_cgroup: bool,
     /// Enable `CLONE_NEWUSER` user namespace isolation.
     pub enable_userns: bool,
-    /// Explicit UID mappings when `enable_userns == true` (defaults to `0 <euid> 1`).
+    /// Explicit UID mappings when `enable_userns == true`. Empty defaults to
+    /// `0 DEFAULT_USERNS_HOST_BASE DEFAULT_USERNS_ID_COUNT` for a root `agentd` and to
+    /// `0 <euid> 1` otherwise. A root `agentd` rejects any range covering host id 0.
     pub uid_map: Vec<IdMapRange>,
-    /// Explicit GID mappings when `enable_userns == true` (defaults to `0 <egid> 1`).
+    /// Explicit GID mappings when `enable_userns == true` (same rules as `uid_map`).
     pub gid_map: Vec<IdMapRange>,
     /// Network namespace mode (defaults to [`NetnsMode::IsolatedLoopback`]).
     pub netns_mode: NetnsMode,

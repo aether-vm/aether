@@ -50,7 +50,7 @@ mod linux_impl {
     use std::ffi::CString;
     use std::fs::{self, File};
     use std::io::{self, Read, Write};
-    use std::os::fd::{AsRawFd, RawFd};
+    use std::os::fd::{AsRawFd, OwnedFd, RawFd};
     use std::path::{Path, PathBuf};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -59,12 +59,14 @@ mod linux_impl {
 
     use crate::client::GuestRpcClient;
     use crate::config::{
-        ExecOutputChunk, ExecReply, ExecRequest, FreezeOptions, FreezeReply, GuestAgentSource,
+        DEFAULT_USERNS_HOST_BASE, DEFAULT_USERNS_ID_COUNT, ExecOutputChunk, ExecReply, ExecRequest, FreezeOptions, FreezeReply, GuestAgentSource,
         IdMapRange, NetnsMode, PingReply, SeccompPolicy, SpawnWorldSpec, WorldInfo,
     };
     use crate::driver::{WorldBackend, WorldHandle};
     use crate::error::SandboxError;
-    use crate::linux_sys::{self, ChildLaunchPlan, ChildStage, GUEST_CONTROL_FD};
+    use crate::linux_sys::{
+        self, AgentBindSource, ChildLaunchPlan, ChildStage, GUEST_CONTROL_FD,
+    };
     use crate::seccomp::build_x86_64_baseline_filter;
 
     const HANDSHAKE_NONCE: u64 = 0x464C_4F4F_4D01;
@@ -287,6 +289,9 @@ mod linux_impl {
     pub fn spawn_world_linux(spec: SpawnWorldSpec) -> Result<WorldHandle, SandboxError> {
         spec.validate()?;
 
+        let remap_root = remaps_root_ids(&spec);
+        let (uid_map, gid_map) = effective_id_maps(&spec)?;
+
         // Refuse symlinked rootfs_dir itself (P0-2).
         let root_meta = fs::symlink_metadata(&spec.rootfs_dir).map_err(|e| {
             SandboxError::InvalidConfig(format!(
@@ -327,7 +332,7 @@ mod linux_impl {
         };
 
         // 2. Build async-signal-safe ChildLaunchPlan in parent BEFORE `clone3`.
-        let plan = match build_launch_plan(&spec) {
+        let (plan, idmapped_mounts) = match build_launch_plan(&spec) {
             Ok(p) => p,
             Err(e) => {
                 drop(cgroup_dirfd);
@@ -371,14 +376,17 @@ mod linux_impl {
             let _ = teardown_world_resources(child_pid, cg.map(|p| p.as_path()));
         };
 
-        // 5. Configure UID/GID maps if userns is enabled.
+        // 5. Configure UID/GID maps if userns is enabled, then idmap the still-detached mounts
+        //    (shared with the child through inherited fds) with the child's user namespace.
         if spec.enable_userns
-            && let Err(e) = configure_userns_maps(child_pid, &spec.uid_map, &spec.gid_map)
+            && let Err(e) = configure_userns_maps(child_pid, &uid_map, &gid_map, remap_root)
+                .and_then(|()| idmap_detached_mounts(child_pid, &idmapped_mounts))
         {
             drop(sync_wr);
             cleanup_on_error(world_cgroup.as_ref());
             return Err(e);
         }
+        drop(idmapped_mounts);
 
         // 6. Release child to execute pivot_root, cap drop, seccomp, and execve.
         {
@@ -508,14 +516,71 @@ mod linux_impl {
         Ok(())
     }
 
-    fn build_launch_plan(spec: &SpawnWorldSpec) -> Result<ChildLaunchPlan, SandboxError> {
+    /// A root `agentd` must back sandbox ids with unprivileged host ids. On-disk ownership stays
+    /// unshifted: the rootfs is attached as an idmapped mount instead of being chowned.
+    fn remaps_root_ids(spec: &SpawnWorldSpec) -> bool {
+        spec.enable_userns && linux_sys::current_euid_egid().0 == 0
+    }
+
+    fn effective_id_maps(
+        spec: &SpawnWorldSpec,
+    ) -> Result<(Vec<IdMapRange>, Vec<IdMapRange>), SandboxError> {
+        let (euid, egid) = linux_sys::current_euid_egid();
+        let remap_root = remaps_root_ids(spec);
+        let pick = |explicit: &[IdMapRange], own_id: u32| {
+            if !explicit.is_empty() {
+                explicit.to_vec()
+            } else if remap_root {
+                vec![IdMapRange::new(0, DEFAULT_USERNS_HOST_BASE, DEFAULT_USERNS_ID_COUNT)]
+            } else {
+                vec![IdMapRange::new(0, own_id, 1)]
+            }
+        };
+        let uid_map = pick(&spec.uid_map, euid);
+        let gid_map = pick(&spec.gid_map, egid);
+        if remap_root && uid_map.iter().chain(&gid_map).any(|r| r.outside_id == 0) {
+            return Err(SandboxError::InvalidConfig(
+                "uid_map / gid_map must not map sandbox ids onto host id 0".to_owned(),
+            ));
+        }
+        Ok((uid_map, gid_map))
+    }
+
+    fn idmap_detached_mounts(child_pid: i32, mounts: &[OwnedFd]) -> Result<(), SandboxError> {
+        if mounts.is_empty() {
+            return Ok(());
+        }
+        let userns = File::open(format!("/proc/{child_pid}/ns/user"))
+            .map_err(|e| SandboxError::spawn("open_child_userns", e))?;
+        for mnt in mounts {
+            linux_sys::idmap_mount(mnt.as_raw_fd(), userns.as_raw_fd())
+                .map_err(|e| SandboxError::spawn("idmap_mount", e))?;
+        }
+        Ok(())
+    }
+
+    /// Returns the plan plus the detached mounts its fds refer to; the caller must keep the
+    /// latter open until `clone3` has returned and the mounts have been idmapped.
+    fn build_launch_plan(
+        spec: &SpawnWorldSpec,
+    ) -> Result<(ChildLaunchPlan, Vec<OwnedFd>), SandboxError> {
         // Verify no symlinks at mount targets inside untrusted rootfs (P0-2).
         for rel in ["proc", "tmp", "dev", "dev/shm"] {
             reject_symlinks_along(&spec.rootfs_dir, Path::new(rel))?;
         }
 
         let rootfs = ChildLaunchPlan::path_to_cstr(&spec.rootfs_dir)?;
-        let rootfs_dev = ChildLaunchPlan::path_to_cstr(&spec.rootfs_dir.join("dev"))?;
+
+        let mut idmapped_mounts = Vec::new();
+        let rootfs_mount_fd = if remaps_root_ids(spec) {
+            let mnt = linux_sys::clone_detached_mount(&spec.rootfs_dir, false)
+                .map_err(|e| SandboxError::spawn("clone_rootfs_mount", e))?;
+            let fd = mnt.as_raw_fd();
+            idmapped_mounts.push(mnt);
+            Some(fd)
+        } else {
+            None
+        };
 
         let mut dev_binds = Vec::new();
         for node in ["null", "zero", "urandom", "random", "full"] {
@@ -523,7 +588,7 @@ mod linux_impl {
             let src_path = PathBuf::from("/dev").join(node);
             if src_path.exists() {
                 let src = ChildLaunchPlan::path_to_cstr(&src_path)?;
-                let dst = ChildLaunchPlan::path_to_cstr(&spec.rootfs_dir.join("dev").join(node))?;
+                let dst = ChildLaunchPlan::path_to_cstr(&PathBuf::from("dev").join(node))?;
                 dev_binds.push((src, dst));
             }
         }
@@ -551,9 +616,17 @@ mod linux_impl {
                         dst_on_host
                     )));
                 }
-                let src_c = ChildLaunchPlan::path_to_cstr(host_path)?;
-                let dst_c = ChildLaunchPlan::path_to_cstr(&dst_on_host)?;
-                (guest_mount_path.clone(), Some((src_c, dst_c)))
+                let dst_c = ChildLaunchPlan::path_to_cstr(rel)?;
+                let src = if rootfs_mount_fd.is_some() {
+                    let mnt = linux_sys::clone_detached_mount(host_path, true)
+                        .map_err(|e| SandboxError::spawn("clone_agent_mount", e))?;
+                    let fd = mnt.as_raw_fd();
+                    idmapped_mounts.push(mnt);
+                    AgentBindSource::DetachedMount(fd)
+                } else {
+                    AgentBindSource::HostPath(ChildLaunchPlan::path_to_cstr(host_path)?)
+                };
+                (guest_mount_path.clone(), Some((src, dst_c)))
             }
         };
 
@@ -593,11 +666,12 @@ mod linux_impl {
             SeccompPolicy::Disabled => None,
         };
 
-        Ok(ChildLaunchPlan {
+        let plan = ChildLaunchPlan {
             enable_userns: spec.enable_userns,
+            drop_groups: remaps_root_ids(spec),
+            rootfs_mount_fd,
             isolate_netns: spec.netns_mode == NetnsMode::IsolatedLoopback,
             rootfs,
-            rootfs_dev,
             dev_binds,
             agent_bind,
             hostname: spec.effective_hostname().into_bytes(),
@@ -607,44 +681,31 @@ mod linux_impl {
             envp_storage,
             envp_ptrs,
             seccomp_filter,
-        })
+        };
+        Ok((plan, idmapped_mounts))
     }
 
     fn configure_userns_maps(
         child_pid: i32,
         uid_map: &[IdMapRange],
         gid_map: &[IdMapRange],
+        remap_root: bool,
     ) -> Result<(), SandboxError> {
-        let (euid, egid) = linux_sys::current_euid_egid();
-        let eff_uid: Vec<IdMapRange> = if uid_map.is_empty() {
-            vec![IdMapRange::new(0, euid, 1)]
-        } else {
-            uid_map.to_vec()
-        };
-        let eff_gid: Vec<IdMapRange> = if gid_map.is_empty() {
-            vec![IdMapRange::new(0, egid, 1)]
-        } else {
-            gid_map.to_vec()
-        };
-
         let proc_dir = PathBuf::from(format!("/proc/{child_pid}"));
 
-        // Deny setgroups when unprivileged or using a single-ID mapping (required by Linux
-        // before writing gid_map without CAP_SETGID in parent userns).
-        let single_id = eff_uid.len() == 1
-            && eff_uid[0].count == 1
-            && eff_gid.len() == 1
-            && eff_gid[0].count == 1;
-        if euid != 0 || single_id {
+        // Deny setgroups when unprivileged (required by Linux before writing gid_map without
+        // CAP_SETGID in the parent userns). Under a root agentd it stays allowed so the child
+        // can drop the supplementary groups it inherited from the host.
+        if !remap_root {
             fs::write(proc_dir.join("setgroups"), "deny")
                 .map_err(|e| SandboxError::spawn("write_setgroups", e))?;
         }
 
-        let uid_text: String = eff_uid.iter().map(IdMapRange::format_proc_line).collect();
+        let uid_text: String = uid_map.iter().map(IdMapRange::format_proc_line).collect();
         fs::write(proc_dir.join("uid_map"), uid_text)
             .map_err(|e| SandboxError::spawn("write_uid_map", e))?;
 
-        let gid_text: String = eff_gid.iter().map(IdMapRange::format_proc_line).collect();
+        let gid_text: String = gid_map.iter().map(IdMapRange::format_proc_line).collect();
         fs::write(proc_dir.join("gid_map"), gid_text)
             .map_err(|e| SandboxError::spawn("write_gid_map", e))?;
 

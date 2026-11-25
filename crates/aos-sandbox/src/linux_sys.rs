@@ -31,6 +31,14 @@ const SYS_CLOSE_RANGE: libc::c_long = 436;
 const SYS_PIVOT_ROOT: libc::c_long = 155;
 const SYS_CAPSET: libc::c_long = 126;
 const SYS_SECCOMP: libc::c_long = 317;
+const SYS_OPEN_TREE: libc::c_long = 428;
+const SYS_MOVE_MOUNT: libc::c_long = 429;
+const SYS_MOUNT_SETATTR: libc::c_long = 442;
+
+const OPEN_TREE_CLONE: libc::c_uint = 1;
+const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
+const MOUNT_ATTR_RDONLY: u64 = 0x1;
+const MOUNT_ATTR_IDMAP: u64 = 0x0010_0000;
 
 const CLONE_INTO_CGROUP: u64 = 0x0002_0000_0000;
 const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
@@ -60,6 +68,15 @@ struct CloneArgs {
     set_tid: u64,
     set_tid_size: u64,
     cgroup: u64,
+}
+
+/// Linux `struct mount_attr` (32 bytes, `<uapi/linux/mount.h>`).
+#[repr(C)]
+struct MountAttr {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
 }
 
 /// Linux `struct sock_fprog` (`<uapi/linux/filter.h>`).
@@ -112,6 +129,7 @@ pub enum ChildStage {
     ExecGuest = 21,
     MountDevShm = 22,
     CloseRange = 23,
+    SetGroups = 24,
 }
 
 impl ChildStage {
@@ -140,19 +158,33 @@ impl ChildStage {
             21 => "execve_aos_guest",
             22 => "mount_dev_shm",
             23 => "close_range_cloexec",
+            24 => "setgroups",
             _ => "unknown_child_stage",
         }
     }
 }
 
+/// Source of the read-only `aos-guest` bind mount.
+pub enum AgentBindSource {
+    /// Host path bind-mounted by the child itself (unprivileged `agentd`).
+    HostPath(CString),
+    /// Detached read-only idmapped mount prepared by the parent (root `agentd`).
+    DetachedMount(RawFd),
+}
+
 /// Pre-allocated, async-signal-safe launch plan built in the parent BEFORE `clone3`.
 pub struct ChildLaunchPlan {
     pub enable_userns: bool,
+    /// Drop inherited host supplementary groups (requires `setgroups` to be allowed).
+    pub drop_groups: bool,
     pub isolate_netns: bool,
     pub rootfs: CString,
-    pub rootfs_dev: CString,
+    /// Detached idmapped clone of `rootfs`; `None` bind-mounts `rootfs` onto itself instead.
+    pub rootfs_mount_fd: Option<RawFd>,
+    /// `(host source, target relative to rootfs)`.
     pub dev_binds: Vec<(CString, CString)>,
-    pub agent_bind: Option<(CString, CString)>,
+    /// `(source, target relative to rootfs)`.
+    pub agent_bind: Option<(AgentBindSource, CString)>,
     pub hostname: Vec<u8>,
     pub exec_path: CString,
     pub argv_storage: Vec<CString>,
@@ -272,6 +304,71 @@ pub fn split_owned_fd(fd: OwnedFd) -> io::Result<(File, File)> {
     Ok((reader, writer))
 }
 
+/// Clone the mount at `path` (never following a trailing symlink) into a detached, private mount.
+///
+/// Private propagation keeps the sandbox's own sub-mounts out of the host mount namespace.
+pub fn clone_detached_mount(path: &Path, readonly: bool) -> io::Result<OwnedFd> {
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    // SAFETY: `c_path` is a valid NUL-terminated string that outlives the call.
+    let fd = unsafe {
+        libc::syscall(
+            SYS_OPEN_TREE,
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            OPEN_TREE_CLONE | (libc::O_CLOEXEC | libc::AT_SYMLINK_NOFOLLOW) as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the kernel just returned this fd and nothing else owns it.
+    let mnt = unsafe { OwnedFd::from_raw_fd(fd as RawFd) };
+    mount_setattr_fd(
+        mnt.as_raw_fd(),
+        &MountAttr {
+            attr_set: if readonly { MOUNT_ATTR_RDONLY } else { 0 },
+            attr_clr: 0,
+            propagation: libc::MS_PRIVATE,
+            userns_fd: 0,
+        },
+    )?;
+    Ok(mnt)
+}
+
+/// Apply the id mapping of `userns_fd` to a detached mount.
+pub fn idmap_mount(mnt_fd: RawFd, userns_fd: RawFd) -> io::Result<()> {
+    mount_setattr_fd(
+        mnt_fd,
+        &MountAttr {
+            attr_set: MOUNT_ATTR_IDMAP,
+            attr_clr: 0,
+            propagation: 0,
+            userns_fd: userns_fd as u64,
+        },
+    )
+}
+
+fn mount_setattr_fd(mnt_fd: RawFd, attr: &MountAttr) -> io::Result<()> {
+    // SAFETY: the empty path with `AT_EMPTY_PATH` targets `mnt_fd`; `attr` has the exact
+    // `struct mount_attr` layout and outlives the call.
+    let rc = unsafe {
+        libc::syscall(
+            SYS_MOUNT_SETATTR,
+            mnt_fd,
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH as libc::c_uint,
+            attr as *const MountAttr,
+            mem::size_of::<MountAttr>(),
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// Return current process effective UID and GID.
 pub fn current_euid_egid() -> (u32, u32) {
     // SAFETY: `geteuid` and `getegid` are always safe and cannot fail.
@@ -344,6 +441,37 @@ unsafe fn fail_child(err_fd: RawFd, stage: ChildStage, errno: i32) -> ! {
     unsafe {
         let _ = libc::write(err_fd, payload.as_ptr().cast::<libc::c_void>(), payload.len());
         libc::_exit(127);
+    }
+}
+
+unsafe fn child_make_root_private(err_wr_fd: RawFd) {
+    // SAFETY: `mount` is a raw syscall on a static path; `fail_child` diverges.
+    unsafe {
+        if libc::mount(
+            ptr::null(),
+            c"/".as_ptr(),
+            ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            ptr::null(),
+        ) != 0
+        {
+            fail_child(err_wr_fd, ChildStage::MountRootPrivate, raw_errno());
+        }
+    }
+}
+
+/// Attach the detached mount `mnt_fd` at `target`; returns the raw syscall result.
+unsafe fn child_move_mount(mnt_fd: RawFd, target: *const libc::c_char) -> libc::c_long {
+    // SAFETY: `target` points into the pre-allocated launch plan; the source path is static.
+    unsafe {
+        libc::syscall(
+            SYS_MOVE_MOUNT,
+            mnt_fd,
+            c"".as_ptr(),
+            libc::AT_FDCWD,
+            target,
+            MOVE_MOUNT_F_EMPTY_PATH,
+        )
     }
 }
 
@@ -440,7 +568,20 @@ unsafe fn run_child_setup(
         }
         libc::close(sync_rd_fd);
 
+        // Attach the idmapped rootfs while still holding the parent's uid: after `setresuid` the
+        // host-side ancestors of `rootfs` may no longer be traversable.
+        let slash = c"/";
+        if let Some(root_fd) = plan.rootfs_mount_fd {
+            child_make_root_private(err_wr_fd);
+            if child_move_mount(root_fd, plan.rootfs.as_ptr()) != 0 {
+                fail_child(err_wr_fd, ChildStage::BindRootfs, raw_errno());
+            }
+        }
+
         // 2. Enter UID 0 / GID 0 inside the new user namespace.
+        if plan.drop_groups && libc::setgroups(0, ptr::null()) != 0 {
+            fail_child(err_wr_fd, ChildStage::SetGroups, raw_errno());
+        }
         if plan.enable_userns {
             if libc::setresgid(0, 0, 0) != 0 {
                 fail_child(err_wr_fd, ChildStage::SetResGid, raw_errno());
@@ -468,40 +609,40 @@ unsafe fn run_child_setup(
             fail_child(err_wr_fd, ChildStage::SetHostname, raw_errno());
         }
 
-        // 5. Make mount propagation private so sandbox mounts never propagate to host.
-        let slash = c"/";
-        if libc::mount(
-            ptr::null(),
-            slash.as_ptr(),
-            ptr::null(),
-            libc::MS_REC | libc::MS_PRIVATE,
-            ptr::null(),
-        ) != 0
-        {
-            fail_child(err_wr_fd, ChildStage::MountRootPrivate, raw_errno());
-        }
-
-        // 6. Bind-mount rootfs_dir onto itself so it is a mountpoint for pivot_root.
-        if libc::mount(
-            plan.rootfs.as_ptr(),
-            plan.rootfs.as_ptr(),
-            ptr::null(),
-            libc::MS_BIND | libc::MS_REC,
-            ptr::null(),
-        ) != 0
-        {
-            fail_child(err_wr_fd, ChildStage::BindRootfs, raw_errno());
+        // 5-6. Without an idmapped rootfs: make mount propagation private so sandbox mounts never
+        //      propagate to host, then bind-mount rootfs_dir onto itself so it is a mountpoint
+        //      for pivot_root. Either way, continue with cwd = new root and relative paths.
+        if let Some(root_fd) = plan.rootfs_mount_fd {
+            if libc::fchdir(root_fd) != 0 {
+                fail_child(err_wr_fd, ChildStage::ChdirRootfs, raw_errno());
+            }
+        } else {
+            child_make_root_private(err_wr_fd);
+            if libc::mount(
+                plan.rootfs.as_ptr(),
+                plan.rootfs.as_ptr(),
+                ptr::null(),
+                libc::MS_BIND | libc::MS_REC,
+                ptr::null(),
+            ) != 0
+            {
+                fail_child(err_wr_fd, ChildStage::BindRootfs, raw_errno());
+            }
+            if libc::chdir(plan.rootfs.as_ptr()) != 0 {
+                fail_child(err_wr_fd, ChildStage::ChdirRootfs, raw_errno());
+            }
         }
 
         // 7. Mount fresh minimal `/dev` tmpfs and bind-mount standard safe device nodes
         //    (must happen before pivot_root while host `/dev/*` is accessible; host already
         //    verified `<rootfs>/dev` is not a symlink).
         let fstype_tmpfs = c"tmpfs";
-        let _ = libc::mkdir(plan.rootfs_dev.as_ptr(), 0o755);
+        let rel_dev = c"dev";
+        let _ = libc::mkdir(rel_dev.as_ptr(), 0o755);
         let dev_opts = c"mode=0755,size=64k";
         if libc::mount(
             fstype_tmpfs.as_ptr(),
-            plan.rootfs_dev.as_ptr(),
+            rel_dev.as_ptr(),
             fstype_tmpfs.as_ptr(),
             libc::MS_NOSUID | libc::MS_STRICTATIME,
             dev_opts.as_ptr().cast::<libc::c_void>(),
@@ -535,7 +676,12 @@ unsafe fn run_child_setup(
         // Optional read-only bind-mount of host static `aos-guest` binary.
         // Preserves locked mount flags from `statvfs` so `MS_REMOUNT | MS_RDONLY`
         // succeeds cleanly inside `CLONE_NEWUSER` and fails closed on error.
-        if let Some((host_bin, dst_bin)) = &plan.agent_bind {
+        if let Some((AgentBindSource::DetachedMount(fd), dst_bin)) = &plan.agent_bind
+            && child_move_mount(*fd, dst_bin.as_ptr()) != 0
+        {
+            fail_child(err_wr_fd, ChildStage::BindAgentBinary, raw_errno());
+        }
+        if let Some((AgentBindSource::HostPath(host_bin), dst_bin)) = &plan.agent_bind {
             if libc::mount(
                 host_bin.as_ptr(),
                 dst_bin.as_ptr(),
@@ -570,9 +716,6 @@ unsafe fn run_child_setup(
         }
 
         // 8. Pivot root using `pivot_root(".", ".")` (zero `.put_old` left in rootfs!).
-        if libc::chdir(plan.rootfs.as_ptr()) != 0 {
-            fail_child(err_wr_fd, ChildStage::ChdirRootfs, raw_errno());
-        }
         let dot = c".";
         if libc::syscall(SYS_PIVOT_ROOT, dot.as_ptr(), dot.as_ptr()) != 0 {
             fail_child(err_wr_fd, ChildStage::PivotRoot, raw_errno());
