@@ -441,6 +441,16 @@ pub fn stream_from_inherited_fd(fd: RawFd) -> io::Result<(File, File)> {
     Ok((reader, writer))
 }
 
+/// Make this process non-dumpable so same-uid workloads can neither write its memory nor reopen
+/// its fds through `/proc`, whatever `kernel.yama.ptrace_scope` is. `execve` resets this.
+pub fn set_non_dumpable() -> io::Result<()> {
+    // SAFETY: `prctl(PR_SET_DUMPABLE)` takes no pointers.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Adopt an inherited file descriptor, setting `FD_CLOEXEC` so `Exec` children never see it.
 pub fn file_from_inherited_fd(fd: RawFd) -> io::Result<File> {
     if fd < 0 {

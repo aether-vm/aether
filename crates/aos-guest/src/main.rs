@@ -13,6 +13,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     use aos_guest::linux_sys;
     use aos_guest::server::AgentServer;
 
+    linux_sys::set_non_dumpable()?;
+
     let mut vsock_port: u32 = 5000;
     let mut socketpair_fd: Option<i32> = None;
     let mut workload_cgroup = PathBuf::from(DEFAULT_WORKLOAD_CGROUP);

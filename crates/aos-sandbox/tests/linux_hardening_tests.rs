@@ -433,3 +433,25 @@ fn workload_cannot_reach_the_exec_cgroup_controls() {
     );
     world.destroy().unwrap();
 }
+
+#[test]
+fn workload_cannot_inspect_or_modify_aos_guest() {
+    let Some(scratch) = Scratch::new("guest-mem") else {
+        return;
+    };
+    let mut world = NamespaceDriver::new().spawn_world(scratch.spec()).unwrap();
+    // `environ` and fd links only need PTRACE_MODE_READ, so unlike `mem` they are not masked by
+    // `kernel.yama.ptrace_scope=1` and prove that the dumpable check itself rejects the workload.
+    for probe in [
+        "cat /proc/1/environ",
+        "readlink /proc/1/fd/3",
+        "exec 3<>/proc/1/mem",
+    ] {
+        let r = sh(&mut world, "probe", probe);
+        assert_ne!(r.exit_code, Some(0), "{probe} must be denied: {r:?}");
+    }
+    // The workload itself stays dumpable.
+    let own = sh(&mut world, "own", "cat /proc/self/environ >/dev/null && readlink /proc/self/fd/0");
+    assert_eq!(own.exit_code, Some(0));
+    world.destroy().unwrap();
+}
