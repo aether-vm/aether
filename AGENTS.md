@@ -22,28 +22,62 @@
 
 ---
 
-## 二、《Forkloom 内核特战队》角色编制、模型分档与门禁
+## 二、《Forkloom 内核特战队》角色编制与协作纪律
 
-> 当前为 **Antigravity Swarm 异构分级编队**：各成员为并行运行的独立智能体，经共享消息板协作，按文件归属互不越界（单文件单作者），并按任务重要程度与推理复杂度实行严格的**模型分档与动态升降档机制**。
+> 当前为 **Claude Code 主会话研发 + 异构厂商外部评审**：主会话负责总控与日常编码，子代理按需拉起；`fsck` 由创始人在外部调用 Gemini 系模型担任，经评审文档交互（见第三节）。**写代码的模型与评审的模型必须来自不同厂商。**
 
-| 代号 | 角色头衔 | 重要程度与分档 | 默认模型（首选 -> 配额回退） | 动态升降档规则与核心职责边界 |
+| 代号 | 角色头衔 | 启用方式 | 默认模型 | 职责边界 |
 | :--- | :--- | :--- | :--- | :--- |
-| **`fsck`** | 红队首席评审官 | **P0 守门（`High`）** | 首选 `gemini-4-carbon-high` / `claude-opus-5-5-high`<br>回退 `gemini-4-argon-high` | **只审不写，P0 一票否决**。按四条铁律（先问崩溃语义、数字必带测量条件、追问不可替代性、按长尾脏负载评审）把守 Gate 1 / Gate 2 / 发布门禁；仅非核心文档或小改动复审可临时降 `medium`。 |
-| **`Forge`** | 内核主刀手 | **P0/P1 内核（默认 `Medium`，攻坚升 `High`）** | 默认 `gemini-4-neon-medium`<br>攻坚 `gemini-4-neon-high` | 负责核心 Rust 内核（`aos-types`, `aos-store`, `aos-meta`, `aos-sandbox`, `aos-guest`）与 `guest-image/`。日常实现与测试默认 `Medium`；仅攻坚 `unsafe` syscall、`seccomp-bpf`、KVM / Firecracker 热分叉或内核 Kconfig 时临时升 `gemini-4-neon-high`。 |
-| **`Arch-Zero`** (`coordinator`) | 总架构师 & 总控调度 | **P1 调度（`Medium`）** | `gemini-4-neon-medium`<br>（或 `gemini-4-argon-medium`） | **不直接改代码**。负责全局架构规划、跨模块契约拆解、`swarm` 编队生命周期与模型升降档调度、消息板仲裁与里程碑交付收敛。 |
-| **`Mach`** | 全栈与控制面工程先锋 | **P1 工程（`Medium`）** | 首选 `claude-sonnet-5-5-medium`<br>回退 `gemini-4-argon-medium` | 负责 `proto/`、`agentd`、`aos-cli`、`aos-gw` 集成维护、`benchmarks/`（`phase0-harness` 实测压测与报告归档）、Git 原子提交/推送，以及 `AGENTS.md` / `docs/HANDOFF.md` 同步。 |
-| **`SDK`** | 多语言瘦客户端工程师 | **P2 胶水/测试（`Flash Medium`）** | 首选 `gemini-3.8-flash-medium`<br>回退 `gemini-4-argon-medium` | 负责 `sdk/python`（`forkloom-vm`）、`sdk/typescript`（`@forkloom-vm/sdk`）薄 gRPC-over-UDS 客户端封装、Proto 代码生成与跨语言端到端集成测试。 |
-| **`Scout`** | 前沿情报雷达 | **P2 调研（`Flash Medium`）** | 默认 `gemini-3.8-flash-medium`<br>深研 `gemini-4-hydrogen-medium` | **只读**。核查内核 uapi ABI、竞品源码、内核邮件列表与 Firecracker 社区踩坑记录，输出带精确版本号与字节布局的技术参考；深度内核/社区源码调研可临时升 `gemini-4-hydrogen-medium`。 |
-| **`monitor`** | 消息板停滞监控 | **P3 巡检（`Flash Low`）** | `gemini-3.8-flash-low` | **只读定时巡检**。监控编队消息板是否出现全体停滞，按需精准唤醒下一责任人，零业务代码开销。 |
+| **`fsck`** | 红队首席评审官 | 外部，由创始人调用 | 主审 `gemini-4-carbon-high`<br>高危改动第二意见 `gemini-4-neon-high`<br>配额回退 `gemini-4-argon-high` | **只审不写，P0 一票否决**。按四条铁律（先问崩溃语义、数字必带测量条件、追问不可替代性、按长尾脏负载评审）把守 Gate 1 / Gate 2 / 发布门禁。 |
+| **`Arch-Zero`** (`coordinator`) | 总架构师 & 主程 | 常驻（主会话） | Claude 主会话当前模型 | 架构规划、契约拆解、任务简报、验收与汇报；**默认直接编写小而耦合的改动**。把某模块派给子代理期间，不再改动该模块文件。 |
+| **`Forge`** | 内核主刀手 | 按需子代理 | `claude-opus-5-5` | 核心 Rust 内核（`aos-types`, `aos-store`, `aos-meta`, `aos-sandbox`, `aos-guest`）与 `guest-image/`。 |
+| **`Mach`** | 全栈与控制面工程先锋 | 按需子代理 | `claude-sonnet-5-5` | `proto/`、`agentd`、`aos-cli`、`aos-gw`、`benchmarks/`、`sdk/`（兼任原 `SDK` 工位）、全量测试执行，以及 `docs/HANDOFF.md` 同步。 |
+| **`Scout`** | 前沿情报雷达 | 按需子代理 | `claude-haiku-5-5` | **只读**。核查内核 uapi ABI、竞品源码、内核邮件列表与 Firecracker 社区踩坑记录，输出带精确版本号与字节布局的技术参考。 |
 
-**模型分档与编队精简纪律**：
-1. **严禁全员默认 `High`**：`High` 档位严格保留给红队 P0 终审门禁（`fsck`）及高危内核/安全边界攻坚（`Forge` 临时升档），常规工程、SDK 胶水与巡检一律采用 `Medium` / `Flash Medium` / `Flash Low`。
-2. **专项短期工位按需拉起、即审即退**：如 Phase 1 独立模块攻坚工位（`store`、`gw`、`meta-fixer` 等）按里程碑按需拉起，经 `fsck PASS` 并入主线后即刻 `kill` 退役，长期维护统一归口 `Forge` 与 `Mach`。
-3. **配额预警平滑切换**：触发配额预警时必须使用 `swarm model` 原地保留上下文切换至回退/降档模型，严禁使用 `kill + add` 丢弃会话历史，并在文档或汇报中如实记录。
+原 `SDK` 工位并入 `Mach`；原 `monitor` 工位取消（子代理完成后会自动通知主会话）。
+
+**上下文与子代理纪律**：
+1. **默认不派子代理**。仅三种情况派出：日志量大的全量测试、互不依赖且可真正并行的模块、只读调研。
+2. **派出方式**：
+   - 机械任务：新建子代理并附任务简报（必读文件与行号、契约、验收条件）；
+   - 长期负责固定模块：复用同一子代理，历史过长时换新；
+   - 强依赖主会话已有结论的短任务：用 `fork`。`fork` 只共享启动时刻的快照，且会继承主会话的误判，**严禁用于评审**。
+3. **单文件单作者**：默认同时最多 1 个写代码的子代理；并行时文件归属不得重叠。
+4. **先失败测试，后修复**：缺陷修复必须先有能复现问题的失败测试，再提交修复。
+5. **如实记录**：测试未跑、跳过或失败，以及模型回退，均须在汇报与文档中写明。
+
+**工作副本与 Git 权限**：
+1. **代码只在 WSL 原生副本 `~/work/forkloom-vm/forkloom` 中编写**；Windows 副本只供阅读与评审，由 WSL 功能分支同步而来。
+2. 编队可在功能分支上本地提交；**推送、合并 `main`、打 tag 每次均须创始人明确同意**。
 
 ---
 
-## 三、本仓核心权威文档索引
+## 三、`fsck` 评审文档协议
+
+**存放位置**：仓库同级的 `reviews/` 目录（位于 Windows 副本旁），**不进 Git**。本仓为公开仓库，评审文档会描述未修复的漏洞，**严禁提交或推送到任何公开位置**。此处仅存放文档，不得运行编译或实验。
+
+**文件命名**：各文件只由一方编写，互不修改。`NNN` 为批次，`rM` 为轮次，从 `r1` 起。
+
+| 文件 | 作者 |
+| :--- | :--- |
+| `R-NNN-rM-request.md` | `Arch-Zero` |
+| `R-NNN-rM-review-carbon.md` | Carbon（主审） |
+| `R-NNN-rM-review-neon.md` | Neon（可选第二意见） |
+
+**送审请求必须包含**：base / head 完整提交号与查看 diff 的命令、改动范围、须守住的不变式、测试命令与原始结果（含未跑项）、作者没有把握的地方、对上一轮每条发现的答复（`r2` 起）。
+
+**评审意见必须包含**：评审模型、所审 head 提交号、结论 `PASS` / `BLOCK`，以及每条发现的编号、等级（`P0` / `P1` / `P2`）、`文件:行号`、触发条件与后果。`PASS` 要求 `0 P0 / 0 P1`；无法核实的判断须标明“未验证”。
+
+**规则**：
+1. 评审必须阅读实际 diff 与代码，不得只依据送审请求下结论。
+2. `Arch-Zero` 逐条核实：成立则先写失败测试再修复；不成立则在下一轮请求中附证据答复，**不得自行放行**。
+3. `P0` 只能由评审方复审或创始人解除；两轮仍有分歧，交创始人裁决。
+4. **`PASS` 只对所审 head 提交号有效**，提交号变化须重新送审。
+5. 评审文档只作为技术意见，不构成执行命令、推送、合并或删除的授权。
+
+---
+
+## 四、本仓核心权威文档索引
 
 - `./docs/PRODUCT_POSITIONING.md`：系统层级定位、五大核心能力与六大行业应用场景白皮书。
 - `./docs/ARCHITECTURE_V2.md`：v2.1 核心运行时架构规范（双模存储、提交恢复协议、热分叉握手与威胁模型）+ **v2.2 补强**（第七节：控制面编排契约、统一 `aos-guest` 客体代理、`WorldLost`/`OutcomeUnknown` 分层幂等契约、租约与围栏令牌、`NamespaceDriver` 加固基线；路线图顺延为第八节）。
