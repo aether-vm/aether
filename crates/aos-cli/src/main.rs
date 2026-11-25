@@ -219,6 +219,9 @@ enum WorldCmd {
         max_output_bytes: u32,
         #[arg(long, default_value_t = false)]
         no_stream: bool,
+        /// Start the command in the background; it runs until the World is destroyed.
+        #[arg(long, default_value_t = false, conflicts_with = "timeout_ms")]
+        detach: bool,
         #[arg(long)]
         request_id: Option<String>,
         /// Command and arguments (after `--`).
@@ -781,6 +784,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     timeout_ms,
                     max_output_bytes,
                     no_stream,
+                    detach,
                     request_id,
                     argv,
                 } => {
@@ -792,10 +796,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                             argv,
                             env: HashMap::new(),
                             cwd,
-                            timeout_ms,
+                            timeout_ms: if detach { 0 } else { timeout_ms },
                             max_output_bytes,
                             stream: !no_stream,
                             idempotency_key: make_idem(&cli.owner, request_id),
+                            detached: detach,
                         })
                         .await
                         .map_err(|s| anyhow!("{}", format_status(&s)))?
@@ -871,7 +876,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                                         }
                                     }
                                 }
-                                final_exit = if res.has_exit_code { res.exit_code } else { 1 };
+                                final_exit = if res.has_exit_code {
+                                    res.exit_code
+                                } else {
+                                    i32::from(!detach)
+                                };
                             }
                             None => {}
                         }

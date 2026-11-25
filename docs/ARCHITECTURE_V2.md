@@ -170,15 +170,17 @@ pub struct Ephemeral<T> { inner: T, boot_id: u128 }
 1. **双驱动同构客体代理（`aos-guest` over `socketpair` / `vsock`）**
    - `Exec` 与沙箱内文件读写**严禁由宿主侧直接操作 `TreeStore` 子卷**（防符号链接竞态穿越与 `userns` UID 错位；亦与 `FirecrackerDriver` 宿主零挂载不可信块镜像红线同构）。两种驱动统一由沙箱内常驻静态 `aos-guest` 执行：`NamespaceDriver` 经 `socketpair`，`FirecrackerDriver` 经 `vsock`。
    - 每次前台 `Exec` 置入**独立子 cgroup**，超时或结束时执行 `cgroup.kill`，杜绝双 fork 逃逸残留进程。
+   - 需要跨 `Exec` 存活的后台服务须显式以 `detached` 启动：立即返回、丢弃输出、不设超时，与 World 共用资源限额，随 World 一同冻结与销毁。
    - 输出采用**流式 `bytes`** 并对 stdout/stderr 分流，超限做**头尾截断**并标注；宿主/`aos-guest` 持续排空管道，防止子进程因写阻塞挂死。
 
 2. **分层幂等与崩溃显式未知契约**
    - **元数据操作**（导入、创建、提交帧、销毁）在 `redb` 单写者事务内原子记录 `RequestId`，为**真幂等**。
+   - `CreateWorld` 的重放返回原 World 的**当前**记录（`agentd` 重启后为 `Lost`）；沙箱启动失败时在同一事务内终结 World 并忘记该 `RequestId`，允许重试。
    - **可写沙箱 `Exec`** 仅提供 **World 存活期内**的 `RequestId` 结果缓存与去重。
    - 跨 `agentd` 崩溃重启，对未决或历史 `Exec` **一律返回显式 `WorldLost` / `OutcomeUnknown`，严禁猜测性自动重放**；是否对账或从 `Durable Frame` 重建由客户端决定。
 
 3. **租约分层存储、停机顺延与围栏令牌（Fencing Token）**
-   - **`World` 租约纯驻内存**，使用单调时钟，与磁盘 `fsync` 尾延迟解耦。
+   - **`World` 租约纯驻内存**，使用单调时钟，与磁盘 `fsync` 尾延迟解耦。到期的 World 由 `agentd` 周期回收；有进行中的 `CreateWorld` / `Exec` / `Checkpoint` 时推迟到其结束，`detached` 进程不构成推迟理由。
    - **`Durable Frame` 的 `Pin` 租约**内存续约、低频落盘；`agentd` 启动恢复时，将存活 `Pin` 租约统一重置为 `now + lease_ttl`，防止停机维护期间墙钟流逝导致重启后误删保留帧。
    - 标签创建后**不可变**；销毁的 `World` 留**短时墓碑**可查；批量选择器禁止空选择并记录调用主体。
    - 客户端接管所有权时获得单调递增的 **`fencing_token`**，后续变更类调用须携带，低于当前令牌的请求返回 `FencedOut`，防止分区后“诈尸”实例双写。

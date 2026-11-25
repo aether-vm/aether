@@ -209,6 +209,9 @@ pub enum GuestRequest {
         stream_chunk_bytes: Option<usize>,
         #[serde(default)]
         stream: bool,
+        /// Start the command without waiting for it; its output is discarded.
+        #[serde(default)]
+        detached: bool,
     },
 
     /// Freeze `aos.workload`, wait for `frozen 1` in `cgroup.events`, and run `syncfs()`.

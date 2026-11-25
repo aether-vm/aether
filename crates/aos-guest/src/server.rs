@@ -30,6 +30,8 @@ pub struct ExecSpec {
     pub timeout: Option<Duration>,
     pub max_output_bytes: usize,
     pub stream_chunk_bytes: usize,
+    /// Return as soon as the command has started, with neither exit code nor output.
+    pub detached: bool,
 }
 
 /// Outcome returned by [`GuestBackend::run_exec`].
@@ -222,6 +224,7 @@ impl<B: GuestBackend> AgentServer<B> {
                 max_output_bytes,
                 stream_chunk_bytes,
                 stream,
+                detached,
             } => {
                 if let Err(err) = self.state.ensure_exec_allowed() {
                     return self.write_error(writer, req_id, err.error_code(), err.to_string());
@@ -289,6 +292,7 @@ impl<B: GuestBackend> AgentServer<B> {
                     timeout: timeout_ms.map(Duration::from_millis),
                     max_output_bytes: resolved_max_output,
                     stream_chunk_bytes: resolved_chunk_bytes,
+                    detached,
                 };
 
                 let codec = self.codec;

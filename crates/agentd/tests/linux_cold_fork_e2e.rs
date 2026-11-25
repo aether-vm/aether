@@ -185,6 +185,7 @@ impl Drop for E2eHarness {
                             let _ = fs::write(sp.join("cgroup.freeze"), b"0\n");
                             let _ = fs::write(sp.join("cgroup.kill"), b"1\n");
                             let _ = fs::remove_dir(sp.join("exec"));
+                            let _ = fs::remove_dir(sp.join("detached"));
                             let _ = fs::remove_dir(&sp);
                         }
                     }
@@ -466,6 +467,19 @@ fn live_expired_world_lease_is_reaped_but_not_during_an_inflight_exec() {
     wait_until("busy world reaped after its Exec", 5, || {
         !cg(&busy).exists() && !subvol(&h, &busy).exists()
     });
+
+    // A detached process is not an in-flight Exec: it goes down with its world's lease.
+    let (svc, svc_fence) = create_world(&aos, &h, &base, "1500");
+    let (ok, _, err) = run_aos(
+        &aos,
+        &h.sock_path,
+        &["world", "exec", &svc, "--fence", &svc_fence, "--detach", "--", "/bin/sh", "-c", "sleep 300"],
+    );
+    assert!(ok, "detached exec failed: {err}");
+    let pid = fs::read_to_string(cg(&svc).join("detached/cgroup.procs")).unwrap();
+    assert!(!pid.trim().is_empty(), "detached process must be running");
+    wait_until("world with detached process reaped", 5, || !cg(&svc).exists());
+    assert!(!Path::new("/proc").join(pid.trim()).exists());
 
     // A live lease is untouched.
     let (ok, _, err) = run_aos(

@@ -130,6 +130,7 @@ impl<R: Read, W: Write> GuestRpcClient<R, W> {
                 max_output_bytes: req.max_output_bytes,
                 stream_chunk_bytes: req.stream_chunk_bytes,
                 stream: req.stream,
+                detached: req.detached,
             },
         )?;
 

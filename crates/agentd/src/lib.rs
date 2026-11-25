@@ -21,4 +21,4 @@ pub mod proto {
 /// Current daemon API major version (`forkloom.v1`).
 pub const API_MAJOR: u32 = 1;
 /// Current daemon API minor version.
-pub const API_MINOR: u32 = 0;
+pub const API_MINOR: u32 = 1;

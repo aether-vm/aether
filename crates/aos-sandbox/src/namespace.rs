@@ -77,6 +77,8 @@ mod linux_impl {
     const EXEC_SOCKET_TIMEOUT_GRACE: Duration = Duration::from_secs(2);
     /// Child of `w-<id>` holding the processes of the current `Exec` (`aos-guest` stays outside).
     const EXEC_CGROUP: &str = "exec";
+    /// Child of `w-<id>` holding detached processes, which only the world's end kills.
+    const DETACHED_CGROUP: &str = "detached";
     const EXEC_KILL_TIMEOUT: Duration = Duration::from_secs(1);
     const DEFAULT_FREEZE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -401,10 +403,14 @@ mod linux_impl {
             // Leaf world cgroup MUST use `create_dir` (never silently reuse a colliding world).
             fs::create_dir(&path).map_err(|e| SandboxError::cgroup(&path, e))?;
             // Limits are in place before `clone3` puts the first task into the world.
-            let exec_cg = path.join(EXEC_CGROUP);
-            if let Err(e) = write_cgroup_limits(&path, &spec.limits).and_then(|()| {
-                fs::create_dir(&exec_cg).map_err(|e| SandboxError::cgroup(&exec_cg, e))
-            }) {
+            let create = |name: &str| {
+                let dir = path.join(name);
+                fs::create_dir(&dir).map_err(|e| SandboxError::cgroup(&dir, e))
+            };
+            if let Err(e) = write_cgroup_limits(&path, &spec.limits)
+                .and_then(|()| create(EXEC_CGROUP))
+                .and_then(|()| create(DETACHED_CGROUP))
+            {
                 remove_world_cgroup(&path);
                 return Err(e);
             }
@@ -740,8 +746,12 @@ mod linux_impl {
         let mut exec_cgroup_fds = Vec::new();
         if let Some(cg) = world_cgroup {
             // Opened with host credentials, which is what the kernel checks on migration.
-            for (file, read) in [("cgroup.procs", true), ("cgroup.kill", false)] {
-                let path = cg.join(EXEC_CGROUP).join(file);
+            for (dir, file, read) in [
+                (EXEC_CGROUP, "cgroup.procs", true),
+                (EXEC_CGROUP, "cgroup.kill", false),
+                (DETACHED_CGROUP, "cgroup.procs", false),
+            ] {
+                let path = cg.join(dir).join(file);
                 let fd = OpenOptions::new()
                     .read(read)
                     .write(true)
@@ -835,8 +845,11 @@ mod linux_impl {
             CString::new(GUEST_CONTROL_FD.to_string())
                 .map_err(|e| SandboxError::InvalidConfig(e.to_string()))?,
         );
-        if let [procs, kill] = inherit_fds[..] {
-            for arg in ["--exec-cgroup-fds".to_owned(), format!("{procs},{kill}")] {
+        if let [procs, kill, detached] = inherit_fds[..] {
+            for arg in [
+                "--exec-cgroup-fds".to_owned(),
+                format!("{procs},{kill},{detached}"),
+            ] {
                 argv_storage.push(
                     CString::new(arg).map_err(|e| SandboxError::InvalidConfig(e.to_string()))?,
                 );
@@ -951,8 +964,14 @@ mod linux_impl {
 
     /// Best-effort removal of a world cgroup that never received a task.
     fn remove_world_cgroup(world_cg: &Path) {
-        let _ = fs::remove_dir(world_cg.join(EXEC_CGROUP));
+        remove_exec_cgroups(world_cg);
         let _ = fs::remove_dir(world_cg);
+    }
+
+    fn remove_exec_cgroups(world_cg: &Path) {
+        for name in [EXEC_CGROUP, DETACHED_CGROUP] {
+            let _ = fs::remove_dir(world_cg.join(name));
+        }
     }
 
     /// Deterministically kill the entire world process tree (`cgroup.kill` + fallback
@@ -995,7 +1014,7 @@ mod linux_impl {
         if let Some(cg) = world_cgroup {
             let deadline = Instant::now() + Duration::from_millis(500);
             loop {
-                let _ = fs::remove_dir(cg.join(EXEC_CGROUP));
+                remove_exec_cgroups(cg);
                 match fs::remove_dir(cg) {
                     Ok(()) => break,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => break,

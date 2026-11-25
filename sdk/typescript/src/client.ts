@@ -703,6 +703,10 @@ export class ForkloomClient {
   /** Execute a command in a World and stream `ExecEvent`s (`WorldService.Exec`). */
   async *exec(req: ExecRequest, opts?: CallOptions): AsyncIterable<ExecEvent> {
     await this.ensureNegotiated(opts);
+    if (req.detached && (this.negotiatedInfo?.apiMinor ?? 0) < 1) {
+      // Older daemons ignore the field and would run the command in the foreground.
+      throw new ForkloomError("detached Exec requires a daemon with apiMinor >= 1");
+    }
     const tok = fencingToken(req.fencingToken);
     const stream: grpc.ClientReadableStream<any> = this.worldClient.Exec(
       {
@@ -715,6 +719,7 @@ export class ForkloomClient {
         timeoutMs: toUint64String(req.timeoutMs),
         maxOutputBytes: req.maxOutputBytes ?? 0,
         stream: req.stream ?? true,
+        detached: req.detached ?? false,
         idempotencyKey: encodeIdem(req.idempotencyKey),
       },
       this.grpcCallOptions(opts),

@@ -118,6 +118,8 @@ pub struct SandboxExecRequest {
     pub max_output_bytes: usize,
     /// Whether to emit live [`SandboxOutputChunk`]s over the channel.
     pub stream: bool,
+    /// Start in the background; `timeout_ms` then bounds only the start.
+    pub detached: bool,
 }
 
 /// One streamed stdout/stderr chunk from `aos-guest`.
@@ -620,6 +622,19 @@ impl SandboxBackend for InMemorySandboxBackend {
         };
         if req.argv.is_empty() {
             return Err(BackendError::InvalidArgument("argv must not be empty".into()));
+        }
+
+        if req.detached {
+            return Ok(SandboxExecResult {
+                exec_id: req.exec_id,
+                exit_code: None,
+                signal: None,
+                timed_out: false,
+                cgroup_killed: false,
+                duration_ms: 1,
+                stdout: BoundedOutput::default(),
+                stderr: BoundedOutput::default(),
+            });
         }
 
         let mut stdout_bytes = Vec::new();
@@ -1221,6 +1236,7 @@ impl SandboxBackend for NamespaceSandboxBackend {
         sbx_req.timeout = Some(Duration::from_millis(req.timeout_ms));
         sbx_req.max_output_bytes = Some(req.max_output_bytes);
         sbx_req.stream = req.stream;
+        sbx_req.detached = req.detached;
 
         let reply = if req.stream {
             handle

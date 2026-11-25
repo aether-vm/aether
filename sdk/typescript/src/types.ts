@@ -295,6 +295,11 @@ export interface ExecRequest {
   timeoutMs?: Uint64Input;
   maxOutputBytes?: number;
   stream?: boolean;
+  /**
+   * Start the command in the background and run it until the World is destroyed. The result then
+   * carries no exit code and no output, and `timeoutMs` must be unset or 0.
+   */
+  detached?: boolean;
   idempotencyKey?: IdempotencyKey;
 }
 

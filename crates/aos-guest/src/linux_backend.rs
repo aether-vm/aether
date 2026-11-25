@@ -30,16 +30,18 @@ use crate::truncation::drain_stream;
 
 static PREFREEZE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// Exec cgroup created and owned by the host, reachable only through two inherited fds.
+/// Exec cgroups created and owned by the host, reachable only through inherited fds.
 ///
 /// The sandbox has no cgroupfs, and the files belong to an unmapped host id, so workloads can
-/// neither leave this cgroup nor reopen the fds through `/proc/1/fd`.
+/// neither leave their cgroup nor reopen the fds through `/proc/1/fd`.
 #[derive(Debug)]
 struct InheritedExecCgroup {
     /// `cgroup.procs`, opened read-write.
     procs: File,
     /// `cgroup.kill`, opened write-only.
     kill: File,
+    /// `cgroup.procs` of the cgroup for detached commands, opened write-only.
+    detached_procs: File,
 }
 
 impl InheritedExecCgroup {
@@ -88,13 +90,59 @@ impl LinuxGuestBackend {
 
     /// Run every `Exec` in the host-owned cgroup behind the given inherited fds
     /// (`NamespaceDriver`) instead of in guest-created sub-cgroups.
-    pub fn with_inherited_exec_cgroup(procs_fd: RawFd, kill_fd: RawFd) -> io::Result<Self> {
+    pub fn with_inherited_exec_cgroup(
+        procs_fd: RawFd,
+        kill_fd: RawFd,
+        detached_procs_fd: RawFd,
+    ) -> io::Result<Self> {
         let mut backend = Self::new(DEFAULT_WORKLOAD_CGROUP, false);
         backend.inherited_exec = Some(Arc::new(InheritedExecCgroup {
             procs: linux_sys::file_from_inherited_fd(procs_fd)?,
             kill: linux_sys::file_from_inherited_fd(kill_fd)?,
+            detached_procs: linux_sys::file_from_inherited_fd(detached_procs_fd)?,
         }));
         Ok(backend)
+    }
+
+    /// Start `spec` outside the per-`Exec` cgroup and leave it to the PID-1 orphan reaper.
+    fn spawn_detached(&self, spec: &ExecSpec) -> Result<ExecOutcome, BackendError> {
+        let start = Instant::now();
+        let failed = |e: &dyn std::fmt::Display| {
+            BackendError::new(
+                ErrorCode::ExecFailed,
+                format!("spawn detached '{}' failed: {e}", spec.argv[0]),
+            )
+        };
+        let mut cmd = Command::new(&spec.argv[0]);
+        cmd.args(&spec.argv[1..])
+            .envs(&spec.env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(cwd) = &spec.cwd {
+            cmd.current_dir(cwd);
+        }
+        if let Some(cg) = &self.inherited_exec {
+            linux_sys::attach_child_to_cgroup_fd(&mut cmd, cg.detached_procs.as_raw_fd());
+        } else if self.enable_cgroup_isolation {
+            let dir = self.cgroup.workload_root().join("detached");
+            std::fs::create_dir_all(&dir).map_err(|e| failed(&e))?;
+            linux_sys::attach_child_to_cgroup(&mut cmd, dir.join("cgroup.procs"))
+                .map_err(|e| failed(&e))?;
+        }
+        let spawn_guard = linux_sys::begin_child_spawn();
+        let spawned = cmd.spawn();
+        drop(spawn_guard);
+        spawned.map_err(|e| failed(&e))?;
+        Ok(ExecOutcome {
+            exit_code: None,
+            signal: None,
+            timed_out: false,
+            cgroup_killed: false,
+            duration: start.elapsed(),
+            stdout: BoundedOutput::default(),
+            stderr: BoundedOutput::default(),
+        })
     }
 
     /// Kill whatever is left of the current `Exec`.
@@ -320,6 +368,9 @@ impl GuestBackend for LinuxGuestBackend {
         spec: ExecSpec,
         on_chunk: &mut dyn FnMut(OutputStream, &[u8]) -> io::Result<()>,
     ) -> Result<ExecOutcome, BackendError> {
+        if spec.detached {
+            return self.spawn_detached(&spec);
+        }
         let start = Instant::now();
         let sub_cgroup = if self.enable_cgroup_isolation {
             let dir = self

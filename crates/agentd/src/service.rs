@@ -55,6 +55,8 @@ pub const DEFAULT_MAX_IMPORT_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_WORLD_LEASE_TTL_MS: u64 = 10 * 60 * 1000;
 /// Default `Exec` timeout when caller omits `timeout_ms` (60 seconds).
 pub const DEFAULT_EXEC_TIMEOUT_MS: u64 = 60 * 1000;
+/// How long starting a detached command may take.
+const DETACHED_START_TIMEOUT_MS: u64 = 10 * 1000;
 /// Default `Exec` max retained bytes per stream (64 KiB).
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
@@ -756,6 +758,7 @@ fn exec_request_digest(req: &ExecRequest) -> [u8; 32] {
     hash_str(&mut hasher, &req.cwd);
     hasher.update(&req.timeout_ms.to_le_bytes());
     hasher.update(&req.max_output_bytes.to_le_bytes());
+    hasher.update(&[u8::from(req.detached)]);
     *hasher.finalize().as_bytes()
 }
 
@@ -1523,6 +1526,15 @@ impl WorldService for AgentdService {
             ));
         }
 
+        if req.detached && req.timeout_ms != 0 {
+            return Err(simple_status(
+                Code::InvalidArgument,
+                ErrorCode::InvalidArgument,
+                "a detached Exec runs until its world ends; timeout_ms must be 0",
+                wid.to_string(),
+            ));
+        }
+
         let idem = parse_idem(req.idempotency_key.clone());
         let has_idem = idem.is_some();
 
@@ -1582,7 +1594,9 @@ impl WorldService for AgentdService {
             argv: req.argv.clone(),
             env: req.env.into_iter().collect(),
             cwd: (!req.cwd.is_empty()).then_some(req.cwd),
-            timeout_ms: if req.timeout_ms == 0 {
+            timeout_ms: if req.detached {
+                DETACHED_START_TIMEOUT_MS
+            } else if req.timeout_ms == 0 {
                 DEFAULT_EXEC_TIMEOUT_MS
             } else {
                 req.timeout_ms
@@ -1592,7 +1606,8 @@ impl WorldService for AgentdService {
             } else {
                 req.max_output_bytes as usize
             },
-            stream: req.stream,
+            stream: req.stream && !req.detached,
+            detached: req.detached,
         };
 
         let (tx, rx) = mpsc::channel::<Result<ExecEvent, Status>>(32);

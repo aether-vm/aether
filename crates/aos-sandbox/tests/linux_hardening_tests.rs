@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aos_guest::ErrorCode;
 use aos_sandbox::{
-    DEFAULT_CGROUP_SLICE_ROOT, DEFAULT_USERNS_HOST_BASE, DEFAULT_USERNS_ID_COUNT, ExecReply, ExecRequest, GuestAgentSource, IdMapRange, NamespaceDriver, ResourceLimits,
+    DEFAULT_CGROUP_SLICE_ROOT, DEFAULT_USERNS_HOST_BASE, DEFAULT_USERNS_ID_COUNT, ExecReply, ExecRequest, FreezeOptions, GuestAgentSource, IdMapRange, NamespaceDriver, ResourceLimits,
     SandboxDriver, SandboxError, SpawnWorldSpec, WorldHandle,
 };
 use aos_types::{EpochId, WorldId};
@@ -462,7 +462,7 @@ fn exec_with_timeout(
 fn world_pids(world: &WorldHandle) -> Vec<u32> {
     let cg = world.info().cgroup_path.clone().unwrap();
     let mut pids = Vec::new();
-    for dir in [cg.clone(), cg.join("exec")] {
+    for dir in [cg.clone(), cg.join("exec"), cg.join("detached")] {
         let raw = fs::read_to_string(dir.join("cgroup.procs")).unwrap_or_default();
         pids.extend(raw.lines().map(|l| l.trim().parse::<u32>().unwrap()));
     }
@@ -616,4 +616,83 @@ fn spawn_world_does_not_deadlock_while_other_threads_start() {
         stuck
     });
     assert_eq!(stuck, None, "spawn_world deadlocked");
+}
+
+fn detach(world: &mut WorldHandle, argv: &[&str]) -> Result<ExecReply, SandboxError> {
+    let mut req = ExecRequest::new("detached", argv.iter().map(|a| (*a).to_owned()).collect());
+    req.detached = true;
+    req.timeout = Some(Duration::from_secs(5));
+    world.exec(req)
+}
+
+#[test]
+fn detached_process_outlives_foreground_execs_until_the_world_is_destroyed() {
+    let Some(scratch) = Scratch::new("detached") else {
+        return;
+    };
+    let mut world = NamespaceDriver::new().spawn_world(scratch.spec()).unwrap();
+    let cg = world.info().cgroup_path.clone().unwrap();
+    let start = Instant::now();
+    let r = detach(
+        &mut world,
+        &["/bin/sh", "-c", "echo noise; while :; do echo t >> /ticks; sleep 0.05; done"],
+    )
+    .unwrap();
+    assert!(start.elapsed() < Duration::from_secs(2), "detached Exec waited");
+    assert_eq!((r.exit_code, r.signal, r.timed_out), (None, None, false));
+    assert_eq!(stdout(&r), "");
+
+    let procs = || fs::read_to_string(cg.join("detached/cgroup.procs")).unwrap();
+    let pid: u32 = procs().trim().parse().expect("one detached process");
+    assert_unprivileged_on_host(pid);
+
+    // Neither a clean nor a killed foreground Exec touches it.
+    let alive = "a=$(wc -l < /ticks); sleep 0.3; b=$(wc -l < /ticks); test $b -gt $a";
+    assert_eq!(sh(&mut world, "clean", "sleep 0.2; true").exit_code, Some(0));
+    let killed = exec_with_timeout(&mut world, "kill", "sleep 9 & wait", Duration::from_millis(300));
+    assert!(killed.timed_out && killed.cgroup_killed, "{killed:?}");
+    assert_eq!(sh(&mut world, "alive", alive).exit_code, Some(0));
+
+    // Checkpoint freezes and resumes it with the world.
+    world.freeze_and_sync(FreezeOptions::disk_clean()).unwrap();
+    let ticks = || fs::metadata(scratch.rootfs().join("ticks")).unwrap().len();
+    let frozen = ticks();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(ticks(), frozen, "detached process must freeze with its world");
+    world.unfreeze(Duration::from_secs(5)).unwrap();
+    assert_eq!(sh(&mut world, "resumed", alive).exit_code, Some(0));
+    assert_eq!(procs().trim(), pid.to_string());
+
+    // A command that cannot start is reported, and an exited one leaves no zombie behind.
+    assert!(matches!(
+        detach(&mut world, &["/no/such/binary"]),
+        Err(SandboxError::GuestError { .. })
+    ));
+    detach(&mut world, &["/bin/sh", "-c", "exit 3"]).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let zombies = sh(&mut world, "zombies", "grep -l '^State:.Z' /proc/[0-9]*/status; true");
+    assert_eq!(stdout(&zombies), "", "detached zombies must be reaped");
+
+    world.destroy().unwrap();
+    assert!(!cg.exists());
+    assert!(!Path::new(&format!("/proc/{pid}")).exists(), "detached process survived destroy");
+}
+
+#[test]
+fn detached_processes_share_the_world_pids_limit() {
+    let Some(scratch) = Scratch::new("detached-pids") else {
+        return;
+    };
+    let mut spec = scratch.spec();
+    spec.limits.pids_max = Some(32);
+    let mut world = NamespaceDriver::new().spawn_world(spec).unwrap();
+    let mut refused = 0;
+    for _ in 0..60 {
+        if detach(&mut world, &["/bin/sh", "-c", "sleep 60"]).is_err() {
+            refused += 1;
+        }
+    }
+    assert!(refused >= 28, "only {refused} of 60 detached commands were refused");
+    assert_eq!(world.ping(5).expect("aos-guest survives").nonce, 5);
+    world.destroy().unwrap();
 }

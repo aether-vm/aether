@@ -540,11 +540,20 @@ class ForkloomClient:
         timeout_ms: int = 0,
         max_output_bytes: int = 0,
         stream: bool = True,
+        detached: bool = False,
         idempotency_key: pb.IdempotencyKey | None = None,
         timeout: float | None = None,
     ) -> Iterator[pb.ExecEvent]:
-        """Execute a command in a World and stream `ExecEvent` messages (`WorldService.Exec`)."""
+        """Execute a command in a World and stream `ExecEvent` messages (`WorldService.Exec`).
+
+        Processes left behind by a command are killed when it ends. With ``detached=True`` the
+        command is started in the background instead and runs until the World is destroyed; the
+        result then carries no exit code and no output, and ``timeout_ms`` must be 0.
+        """
         self._ensure_negotiated(timeout=timeout)
+        if detached and (self._server_info is None or self._server_info.api_minor < 1):
+            # Older daemons ignore the field and would run the command in the foreground.
+            raise ForkloomError("detached Exec requires a daemon with api_minor >= 1")
         req = pb.ExecRequest(
             world_id=world_id,
             owner=owner,
@@ -556,6 +565,7 @@ class ForkloomClient:
             max_output_bytes=max_output_bytes,
             stream=stream,
             idempotency_key=idempotency_key,
+            detached=detached,
         )
 
         def _event_stream() -> Iterator[pb.ExecEvent]:
@@ -580,6 +590,7 @@ class ForkloomClient:
         timeout_ms: int = 0,
         max_output_bytes: int = 0,
         stream: bool = True,
+        detached: bool = False,
         idempotency_key: pb.IdempotencyKey | None = None,
         on_chunk: Callable[[pb.ExecOutputChunk], None] | None = None,
         timeout: float | None = None,
@@ -596,6 +607,7 @@ class ForkloomClient:
             timeout_ms=timeout_ms,
             max_output_bytes=max_output_bytes,
             stream=stream,
+            detached=detached,
             idempotency_key=idempotency_key,
             timeout=timeout,
         ):

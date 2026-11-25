@@ -69,6 +69,7 @@ def _abort_with_detail(
 class MockState:
     api_major: int = 1
     api_minor: int = 0
+    last_exec: pb.ExecRequest | None = None
     daemon_version: str = "0.1.0-alpha.0"
     daemon_epoch: int = 7
     enabled_drivers: list[str] = field(default_factory=lambda: ["namespace", "firecracker"])
@@ -298,6 +299,7 @@ class MockAgentd(
         self, request: pb.ExecRequest, context: grpc.ServicerContext
     ) -> Iterator[pb.ExecEvent]:
         self.state.recorded_calls.append("Exec")
+        self.state.last_exec = request
         self._maybe_fail(context)
         yield pb.ExecEvent(
             chunk=pb.ExecOutputChunk(
@@ -548,6 +550,14 @@ def test_all_17_rpcs_and_streaming(mock_server: tuple[str, MockState]) -> None:
         )
         assert res.exec_id == "exec_01"
         assert seen_chunks == [b"hello ", b"warn\n", b"world\n"]
+
+        # Detached Exec needs a daemon that knows the field.
+        with pytest.raises(ForkloomError, match="api_minor"):
+            client.exec(wid, "alice", tok, ["/bin/server"], detached=True)
+        state.api_minor = 1
+        client.negotiate_version()
+        client.exec_collect(wid, "alice", tok, ["/bin/server"], detached=True)
+        assert state.last_exec is not None and state.last_exec.detached
 
         # 16. Checkpoint
         ck = client.checkpoint(

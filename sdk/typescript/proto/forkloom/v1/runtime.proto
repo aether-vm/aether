@@ -384,6 +384,10 @@ message ExecRequest {
   bool stream = 9;
   // World-lifetime dedup key; never auto-replayed across agentd restart (WorldLost/OutcomeUnknown).
   IdempotencyKey idempotency_key = 10;
+  // Start the command in the background and return at once: it keeps running until the World is
+  // destroyed, its output is discarded, and timeout_ms must be 0. Foreground commands never
+  // outlive their Exec. Since api_minor 1.
+  bool detached = 11;
 }
 
 message ExecOutputChunk {

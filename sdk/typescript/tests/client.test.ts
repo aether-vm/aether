@@ -50,6 +50,7 @@ interface PendingError {
 interface MockState {
   apiMajor: number;
   apiMinor: number;
+  lastExec?: any;
   daemonVersion: string;
   daemonEpoch: bigint;
   negotiateCalls: number;
@@ -284,6 +285,7 @@ function createMockServer(): Promise<{
     },
     Exec(call: any) {
       state.recordedCalls.push("Exec");
+      state.lastExec = call.request;
       const err = popError();
       if (err) {
         call.emit("error", err);
@@ -664,6 +666,21 @@ describe("@forkloom-vm/sdk", () => {
     } finally {
       skewed.close();
       state.apiMajor = 1;
+    }
+  });
+
+  it("sends detached Exec only to daemons that know it", async () => {
+    const client = new ForkloomClient({ target });
+    const req = { worldId: "wld_01", owner: "alice", fencingToken: 1, argv: ["/bin/server"], detached: true };
+    try {
+      await assert.rejects(() => client.execCollect(req), /apiMinor/);
+      state.apiMinor = 1;
+      await client.negotiateVersion();
+      await client.execCollect(req);
+      assert.equal(state.lastExec.detached, true);
+    } finally {
+      state.apiMinor = 0;
+      client.close();
     }
   });
 

@@ -279,6 +279,7 @@ async fn full_phase1_control_plane_lifecycle_and_fencing() {
                 owner: "alice".into(),
                 request_id: "exec-write-1".into(),
             }),
+            detached: false,
         }))
         .await
         .unwrap()
@@ -315,6 +316,7 @@ async fn full_phase1_control_plane_lifecycle_and_fencing() {
                 owner: "alice".into(),
                 request_id: "exec-write-1".into(),
             }),
+            detached: false,
         }))
         .await
         .unwrap()
@@ -341,6 +343,7 @@ async fn full_phase1_control_plane_lifecycle_and_fencing() {
                 owner: "alice".into(),
                 request_id: "exec-write-1".into(),
             }),
+            detached: false,
         }))
         .await
         .unwrap_err();
@@ -605,6 +608,7 @@ async fn daemon_restart_returns_explicit_world_lost_and_outcome_unknown() {
             max_output_bytes: 4096,
             stream: false,
             idempotency_key: None,
+            detached: false,
         }))
         .await
         .unwrap_err();
@@ -629,6 +633,7 @@ async fn daemon_restart_returns_explicit_world_lost_and_outcome_unknown() {
                 owner: "bob".into(),
                 request_id: "maybe-ran-before-crash".into(),
             }),
+            detached: false,
         }))
         .await
         .unwrap_err();
@@ -788,6 +793,7 @@ async fn idempotency_conflict_and_rollback_safety_across_import_checkpoint_world
                 owner: "alice".into(),
                 request_id: "exec-boundary-1".into(),
             }),
+            detached: false,
         }))
         .await
         .unwrap()
@@ -809,6 +815,7 @@ async fn idempotency_conflict_and_rollback_safety_across_import_checkpoint_world
                 owner: "alice".into(),
                 request_id: "exec-boundary-1".into(),
             }),
+            detached: false,
         }))
         .await
         .unwrap_err();
@@ -935,6 +942,7 @@ async fn tree_store_backend_and_production_recovery_hooks_roundtrip() {
             max_output_bytes: 4096,
             stream: false,
             idempotency_key: None,
+            detached: false,
         }))
         .await
         .unwrap()
@@ -1226,4 +1234,64 @@ async fn failed_spawn_does_not_consume_the_create_world_key() {
         .world
         .unwrap();
     assert_eq!(ok.state, WorldStateKind::WorldStateRunning as i32);
+}
+
+#[tokio::test]
+async fn detached_exec_rejects_timeouts_and_is_part_of_the_idempotency_digest() {
+    let env = TestEnv::new("detached");
+    let svc = env.boot_service();
+    let base = import_base(&svc, "bob").await;
+    let w = svc
+        .create_world(Request::new(keyed_create(&base, "cw")))
+        .await
+        .unwrap()
+        .into_inner()
+        .world
+        .unwrap();
+    let req = ExecRequest {
+        world_id: w.world_id,
+        owner: "bob".into(),
+        fencing_token: w.fencing_token,
+        argv: vec!["server".into()],
+        detached: true,
+        idempotency_key: Some(IdempotencyKey {
+            owner: "bob".into(),
+            request_id: "srv".into(),
+        }),
+        ..Default::default()
+    };
+
+    let err = svc
+        .exec(Request::new(ExecRequest {
+            timeout_ms: 1_000,
+            ..req.clone()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        decode_error_detail(&err).unwrap().code,
+        ErrorCode::InvalidArgument as i32
+    );
+
+    let mut stream = svc.exec(Request::new(req.clone())).await.unwrap().into_inner();
+    let mut result = None;
+    while let Some(ev) = stream.next().await {
+        match ev.unwrap().event.unwrap() {
+            proto::exec_event::Event::Result(r) => result = Some(r),
+            proto::exec_event::Event::Chunk(c) => panic!("unexpected output {c:?}"),
+        }
+    }
+    assert!(!result.expect("terminal result").has_exit_code);
+
+    let err = svc
+        .exec(Request::new(ExecRequest {
+            detached: false,
+            ..req
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        decode_error_detail(&err).unwrap().code,
+        ErrorCode::IdempotencyConflict as i32
+    );
 }

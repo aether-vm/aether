@@ -834,6 +834,7 @@ fn full_hot_fork_lifecycle_across_vsock_transport_reset() {
                     max_output_bytes: Some(16),
                     stream_chunk_bytes: Some(10),
                     stream: true,
+                    detached: false,
                 },
             ),
             RequestEnvelope::new(
@@ -857,6 +858,7 @@ fn full_hot_fork_lifecycle_across_vsock_transport_reset() {
                     max_output_bytes: None,
                     stream_chunk_bytes: None,
                     stream: false,
+                    detached: false,
                 },
             ),
         ],
@@ -1194,6 +1196,7 @@ fn pre_freeze_hook_failure_and_exec_validation() {
                     max_output_bytes: None,
                     stream_chunk_bytes: None,
                     stream: false,
+                    detached: false,
                 },
             ),
             // Empty argv rejected before reaching backend.
@@ -1208,6 +1211,7 @@ fn pre_freeze_hook_failure_and_exec_validation() {
                     max_output_bytes: None,
                     stream_chunk_bytes: None,
                     stream: false,
+                    detached: false,
                 },
             ),
             // Failing pre_freeze_hook aborts before freezing and leaves agent Ready.
@@ -1281,6 +1285,7 @@ fn exec_enforces_frame_safe_output_and_chunk_bounds() {
                 max_output_bytes: Some(out_cap + 1),
                 stream_chunk_bytes: None,
                 stream: false,
+                detached: false,
             },
         ),
         // stream_chunk_bytes == 0 -> InvalidRequest.
@@ -1295,6 +1300,7 @@ fn exec_enforces_frame_safe_output_and_chunk_bounds() {
                 max_output_bytes: None,
                 stream_chunk_bytes: Some(0),
                 stream: true,
+                detached: false,
             },
         ),
         // stream_chunk_bytes exceeding frame-safe limit -> InvalidRequest.
@@ -1309,6 +1315,7 @@ fn exec_enforces_frame_safe_output_and_chunk_bounds() {
                 max_output_bytes: None,
                 stream_chunk_bytes: Some(chunk_cap + 1),
                 stream: true,
+                detached: false,
             },
         ),
         // Exact boundary (both stdout and stderr capped at out_cap, streaming at chunk_cap)
@@ -1324,6 +1331,7 @@ fn exec_enforces_frame_safe_output_and_chunk_bounds() {
                 max_output_bytes: Some(out_cap),
                 stream_chunk_bytes: Some(chunk_cap),
                 stream: true,
+                detached: false,
             },
         ),
     ];

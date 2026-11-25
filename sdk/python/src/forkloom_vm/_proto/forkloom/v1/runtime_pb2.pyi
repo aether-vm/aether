@@ -563,7 +563,7 @@ class RenewWorldLeaseResponse(_message.Message):
     def __init__(self, renewed_ttl_ms: _Optional[int] = ...) -> None: ...
 
 class ExecRequest(_message.Message):
-    __slots__ = ("world_id", "owner", "fencing_token", "argv", "env", "cwd", "timeout_ms", "max_output_bytes", "stream", "idempotency_key")
+    __slots__ = ("world_id", "owner", "fencing_token", "argv", "env", "cwd", "timeout_ms", "max_output_bytes", "stream", "idempotency_key", "detached")
     class EnvEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -581,6 +581,7 @@ class ExecRequest(_message.Message):
     MAX_OUTPUT_BYTES_FIELD_NUMBER: _ClassVar[int]
     STREAM_FIELD_NUMBER: _ClassVar[int]
     IDEMPOTENCY_KEY_FIELD_NUMBER: _ClassVar[int]
+    DETACHED_FIELD_NUMBER: _ClassVar[int]
     world_id: str
     owner: str
     fencing_token: FencingToken
@@ -591,7 +592,8 @@ class ExecRequest(_message.Message):
     max_output_bytes: int
     stream: bool
     idempotency_key: IdempotencyKey
-    def __init__(self, world_id: _Optional[str] = ..., owner: _Optional[str] = ..., fencing_token: _Optional[_Union[FencingToken, _Mapping]] = ..., argv: _Optional[_Iterable[str]] = ..., env: _Optional[_Mapping[str, str]] = ..., cwd: _Optional[str] = ..., timeout_ms: _Optional[int] = ..., max_output_bytes: _Optional[int] = ..., stream: _Optional[bool] = ..., idempotency_key: _Optional[_Union[IdempotencyKey, _Mapping]] = ...) -> None: ...
+    detached: bool
+    def __init__(self, world_id: _Optional[str] = ..., owner: _Optional[str] = ..., fencing_token: _Optional[_Union[FencingToken, _Mapping]] = ..., argv: _Optional[_Iterable[str]] = ..., env: _Optional[_Mapping[str, str]] = ..., cwd: _Optional[str] = ..., timeout_ms: _Optional[int] = ..., max_output_bytes: _Optional[int] = ..., stream: _Optional[bool] = ..., idempotency_key: _Optional[_Union[IdempotencyKey, _Mapping]] = ..., detached: _Optional[bool] = ...) -> None: ...
 
 class ExecOutputChunk(_message.Message):
     __slots__ = ("stream", "seq", "data")

@@ -301,6 +301,9 @@ pub struct ExecRequest {
     pub max_output_bytes: Option<usize>,
     pub stream_chunk_bytes: Option<usize>,
     pub stream: bool,
+    /// Start the command and return at once. It survives later `Exec`s until the world is
+    /// destroyed; `timeout` then only bounds the start itself.
+    pub detached: bool,
 }
 
 impl ExecRequest {
@@ -314,6 +317,7 @@ impl ExecRequest {
             max_output_bytes: None,
             stream_chunk_bytes: None,
             stream: false,
+            detached: false,
         }
     }
 }

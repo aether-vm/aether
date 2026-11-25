@@ -291,6 +291,24 @@ def test_live_agentd_parallel_cold_fork_swe_bench() -> None:
                 ["/bin/sh", "-c", cmd_mutate],
             )
             assert res_mut.exit_code == 0
+
+            # A detached service outlives its Exec and is reachable from the next one.
+            started = client.exec_collect(
+                wid,
+                owner,
+                token,
+                ["/bin/sh", "-c", "while :; do echo tick >> /tmp/ticks; sleep 0.1; done"],
+                detached=True,
+            )
+            assert not started.has_exit_code
+            alive = client.exec_collect(
+                wid,
+                owner,
+                token,
+                ["/bin/sh", "-c", "sleep 0.5; a=$(wc -l < /tmp/ticks); sleep 0.5; "
+                 "b=$(wc -l < /tmp/ticks); test $b -gt $a"],
+            )
+            assert alive.exit_code == 0
             ls_output = res_mut.stdout.head.decode("utf-8", errors="replace")
 
             # Checkpoint the world
