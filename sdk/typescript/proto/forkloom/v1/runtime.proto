@@ -379,6 +379,7 @@ message ExecRequest {
   repeated string argv = 4;
   map<string, string> env = 5;
   string cwd = 6;
+  // 0 = 60 s; at most 3_600_000 (1 hour), larger values fail with INVALID_ARGUMENT.
   uint64 timeout_ms = 7;
   uint32 max_output_bytes = 8;
   bool stream = 9;

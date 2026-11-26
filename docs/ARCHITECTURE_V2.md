@@ -180,7 +180,7 @@ pub struct Ephemeral<T> { inner: T, boot_id: u128 }
    - 跨 `agentd` 崩溃重启，对未决或历史 `Exec` **一律返回显式 `WorldLost` / `OutcomeUnknown`，严禁猜测性自动重放**；是否对账或从 `Durable Frame` 重建由客户端决定。
 
 3. **租约分层存储、停机顺延与围栏令牌（Fencing Token）**
-   - **`World` 租约纯驻内存**，使用单调时钟，与磁盘 `fsync` 尾延迟解耦。到期的 World 由 `agentd` 周期回收；有进行中的 `CreateWorld` / `Exec` / `Checkpoint` 时推迟到其结束，`detached` 进程不构成推迟理由。
+   - **`World` 租约纯驻内存**，使用单调时钟，与磁盘 `fsync` 尾延迟解耦。到期的 World 由 `agentd` 周期回收；有进行中的 `CreateWorld` / `Exec` / `Checkpoint` 时推迟到其结束，`detached` 进程不构成推迟理由。前台 `Exec` 超时上限 1 小时，因此推迟至多 1 小时。
    - **`Durable Frame` 的 `Pin` 租约**内存续约、低频落盘；`agentd` 启动恢复时，将存活 `Pin` 租约统一重置为 `now + lease_ttl`，防止停机维护期间墙钟流逝导致重启后误删保留帧。
    - 标签创建后**不可变**；销毁的 `World` 留**短时墓碑**可查；批量选择器禁止空选择并记录调用主体。
    - 客户端接管所有权时获得单调递增的 **`fencing_token`**，后续变更类调用须携带，低于当前令牌的请求返回 `FencedOut`，防止分区后“诈尸”实例双写。
