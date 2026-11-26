@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use aos_gw::{
     AuditStore, BindingKey, CapabilityPolicy, EpochFenceRegistry, GwError, SlotBinding, SlotId,
@@ -92,6 +92,8 @@ struct AgentdInner {
     busy_worlds: Mutex<HashMap<WorldId, usize>>,
     /// World-lifetime Exec dedup cache keyed by `(world_id, owner, request_id)` (ARCHITECTURE_V2 §7.2).
     exec_cache: Mutex<HashMap<(WorldId, String, String), CachedExec>>,
+    /// Held while a world is torn down, so a second teardown waits instead of skipping ahead.
+    teardowns: Mutex<HashMap<WorldId, Arc<Mutex<()>>>>,
     exec_seq: AtomicU64,
     /// Shared `aos-gw` Epoch Fence Registry enforcing `(slot_id, world_id, daemon_epoch)` isolation.
     gateway_fence: Arc<EpochFenceRegistry>,
@@ -168,6 +170,7 @@ impl AgentdService {
                 idem_digests: Mutex::new(HashMap::new()),
                 busy_worlds: Mutex::new(HashMap::new()),
                 exec_cache: Mutex::new(HashMap::new()),
+                teardowns: Mutex::new(HashMap::new()),
                 exec_seq: AtomicU64::new(1),
                 gateway_fence: Arc::new(EpochFenceRegistry::new(initial_epoch)),
                 audit_store: None,
@@ -257,7 +260,20 @@ impl AgentdService {
     }
 
     /// Release everything a world that already ended in `meta` still occupies.
+    ///
+    /// A concurrent call for the same world (a retried `DestroyWorld`, the lease reaper) waits
+    /// for this one: the sandbox backend returns at once for a world it already dropped, and the
+    /// rootfs must not be deleted while the sandbox is still being torn down.
     fn teardown_world(&self, wid: WorldId) {
+        let lock = self
+            .inner
+            .teardowns
+            .lock()
+            .unwrap()
+            .entry(wid)
+            .or_default()
+            .clone();
+        let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
         if let Err(e) = self.inner.sandbox.destroy_world(wid) {
             eprintln!("agentd: destroying sandbox of world {wid} failed: {e}");
         }
@@ -284,6 +300,8 @@ impl AgentdService {
             .lock()
             .unwrap()
             .retain(|(w, _, _), _| *w != wid);
+        // Later teardowns of this world find nothing left to release.
+        self.inner.teardowns.lock().unwrap().remove(&wid);
     }
 
     async fn lock_idem(&self, idem: Option<&MetaIdempotencyKey>) -> Option<OwnedMutexGuard<()>> {

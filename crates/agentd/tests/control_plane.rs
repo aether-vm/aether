@@ -1372,3 +1372,80 @@ async fn destroy_without_a_key_after_the_lease_expired_returns_the_tombstone() {
     assert_eq!(rec.state, WorldStateKind::WorldStateDestroyed as i32);
 }
 
+/// Like `NamespaceSandboxBackend`: the first `destroy_world` blocks (an Exec still running, a slow
+/// cgroup), later ones find nothing to do. Records whether the rootfs outlived the first one.
+#[derive(Default)]
+struct SlowTeardown {
+    inner: InMemorySandboxBackend,
+    rootfs: std::sync::Mutex<Option<PathBuf>>,
+    calls: AtomicU32,
+    entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    rootfs_kept: std::sync::atomic::AtomicBool,
+}
+
+impl SandboxBackend for SlowTeardown {
+    fn enabled_drivers(&self) -> Vec<String> {
+        self.inner.enabled_drivers()
+    }
+    fn spawn_world(&self, spec: SpawnWorldSpec) -> Result<(), BackendError> {
+        *self.rootfs.lock().unwrap() = Some(spec.rootfs_path.clone());
+        self.inner.spawn_world(spec)
+    }
+    fn exec(
+        &self,
+        world_id: WorldId,
+        req: SandboxExecRequest,
+        tx: tokio::sync::mpsc::Sender<SandboxOutputChunk>,
+    ) -> Result<SandboxExecResult, BackendError> {
+        self.inner.exec(world_id, req, tx)
+    }
+    fn freeze_and_sync(&self, world_id: WorldId, sync: bool) -> Result<bool, BackendError> {
+        self.inner.freeze_and_sync(world_id, sync)
+    }
+    fn unfreeze(&self, world_id: WorldId) -> Result<(), BackendError> {
+        self.inner.unfreeze(world_id)
+    }
+    fn destroy_world(&self, world_id: WorldId) -> Result<(), BackendError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            if let Some(tx) = self.entered.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let rootfs = self.rootfs.lock().unwrap().clone().unwrap();
+            self.rootfs_kept.store(rootfs.exists(), Ordering::SeqCst);
+        }
+        self.inner.destroy_world(world_id)
+    }
+}
+
+/// A second teardown of the same world (a retried DestroyWorld, or one racing the lease reaper)
+/// must wait for the first instead of deleting the rootfs under a live sandbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_destroys_remove_the_rootfs_only_after_the_sandbox() {
+    let env = TestEnv::new("destroy-race");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let sandbox = Arc::new(SlowTeardown {
+        entered: std::sync::Mutex::new(Some(tx)),
+        ..Default::default()
+    });
+    let svc = env.boot_service_with(sandbox.clone());
+    let base = import_base(&svc, "bob").await;
+    let w = running_world(&svc, &base, "cw").await;
+    let destroy = |request_id: &str| {
+        let svc = svc.clone();
+        let req = destroy_req(&w, Some(request_id));
+        tokio::spawn(async move { svc.destroy_world(Request::new(req)).await.map(|_| ()) })
+    };
+    let first = destroy("dw-1");
+    tokio::task::spawn_blocking(move || rx.recv().unwrap())
+        .await
+        .unwrap();
+    let second = destroy("dw-2");
+    second.await.unwrap().unwrap();
+    first.await.unwrap().unwrap();
+    assert!(
+        sandbox.rootfs_kept.load(Ordering::SeqCst),
+        "rootfs was removed while the sandbox was still being torn down"
+    );
+}
+
