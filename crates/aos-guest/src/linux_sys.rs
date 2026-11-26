@@ -558,17 +558,10 @@ pub fn mount_pid1_filesystems() {
 /// host opened as `procs_fd`; `procs_fd` must stay open until the command has been spawned.
 pub fn attach_child_to_cgroup_fd(cmd: &mut Command, procs_fd: RawFd) {
     // SAFETY: The closure runs between `fork` and `exec` and only invokes the async-signal-safe
-    // `write` syscall with a static payload.
+    // `pwrite` syscall with a static payload. `pwrite` leaves the offset shared with aos-guest
+    // alone.
     unsafe {
-        cmd.pre_exec(move || {
-            let payload = b"0\n";
-            let written =
-                libc::write(procs_fd, payload.as_ptr().cast::<libc::c_void>(), payload.len());
-            if written < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        cmd.pre_exec(move || write_all_at_start(procs_fd, b"0\n"));
     }
 }
 

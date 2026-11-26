@@ -864,6 +864,18 @@ mod linux_impl {
         Ok(true)
     }
 
+    /// Pids in `cg` and in every cgroup below it (`exec/` holds the workload).
+    fn subtree_pids(ctrl: &CgroupV2Controller, cg: &Path) -> io::Result<Vec<i32>> {
+        let mut pids = ctrl.read_pids(cg).map_err(io::Error::other)?;
+        for entry in fs::read_dir(cg)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                pids.extend(subtree_pids(ctrl, &entry.path())?);
+            }
+        }
+        Ok(pids)
+    }
+
     /// Best-effort removal of a world cgroup that never received a task.
     fn remove_world_cgroup(world_cg: &Path) {
         let _ = fs::remove_dir(world_cg.join(EXEC_CGROUP));
@@ -888,7 +900,7 @@ mod linux_impl {
                     let _ = ctrl.write_freeze_at(cg, true);
                     let deadline = Instant::now() + Duration::from_millis(500);
                     while Instant::now() < deadline {
-                        let Ok(pids) = ctrl.read_pids(cg) else {
+                        let Ok(pids) = subtree_pids(&ctrl, cg) else {
                             break;
                         };
                         if pids.is_empty() {
