@@ -17,7 +17,7 @@ use aos_gw::{
 use aos_meta::{
     CommitFrameRequest, CommitProofBundle, CreateWorldRequest as MetaCreateWorldRequest,
     DeleteOutcome, FencingToken as MetaFencingToken, FrameDurability as MetaDurability,
-    FrameRecord, FrameState, GcReport, Hold, IdempotencyKey as MetaIdempotencyKey, Labels, ManagedObject,
+    FrameRecord, FrameState, GcPass, GcReport, Hold, IdempotencyKey as MetaIdempotencyKey, Labels, ManagedObject,
     MetaEngine, ObjectKind, PinSpec as MetaPinSpec, PrepareFrameRequest, TimelineTarget,
     WorldFence, WorldRecord, WorldState,
 };
@@ -63,6 +63,8 @@ pub const MAX_EXEC_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 const DETACHED_START_TIMEOUT_MS: u64 = 10 * 1000;
 /// Physical deletions per `meta` lock hold during garbage collection.
 const GC_BATCH: usize = 4;
+/// Batches per pass; anything left waits for the next pass.
+const GC_MAX_BATCHES: usize = 64;
 const GC_BATCH_PAUSE: Duration = Duration::from_millis(5);
 /// Default `Exec` max retained bytes per stream (64 KiB).
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -271,27 +273,31 @@ impl AgentdService {
     }
 
     /// Run one garbage-collection pass, releasing `meta` between batches of physical deletions.
+    /// A pass runs at most [`GC_MAX_BATCHES`] batches.
     pub fn collect_garbage(&self) -> Result<GcReport, aos_meta::MetaError> {
         let mut total = GcReport::default();
-        loop {
+        let mut pass = GcPass::default();
+        for _ in 0..GC_MAX_BATCHES {
             let r = self
                 .inner
                 .meta
                 .lock()
                 .unwrap()
-                .collect_garbage_batch(GC_BATCH)?;
+                .collect_garbage_batch(GC_BATCH, &mut pass)?;
             total.pins_expired += r.pins_expired;
             total.frames_deleted += r.frames_deleted;
             total.quarantine_purged += r.quarantine_purged;
             total.tombstones_purged += r.tombstones_purged;
             total.idempotency_purged += r.idempotency_purged;
-            total.failures = r.failures;
+            total.failures.extend(r.failures);
+            total.more = r.more;
             if !r.more {
-                return Ok(total);
+                break;
             }
             // The mutex is not fair: give waiting requests a chance to take it.
             std::thread::sleep(GC_BATCH_PAUSE);
         }
+        Ok(total)
     }
 
     /// Release everything a world that already ended in `meta` still occupies.

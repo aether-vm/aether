@@ -45,6 +45,6 @@ pub use model::{
 pub use pool::{BTRFS_SUPER_MAGIC_RAW, is_same_or_forbidden_fs};
 pub use recovery::RecoverySummary;
 pub use store::{
-    CommitFrameRequest, CommitProofBundle, CommittedFrame, DeleteOutcome, GcReport, MetaEngine,
+    CommitFrameRequest, CommitProofBundle, CommittedFrame, DeleteOutcome, GcPass, GcReport, MetaEngine,
     ObjectProof, PrepareFrameRequest, PreparedFrame, TimelineAdvance, TimelineTarget, WorldFence,
 };

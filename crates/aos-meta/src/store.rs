@@ -201,6 +201,14 @@ impl CommitProofBundle {
     }
 }
 
+/// State of one GC pass across its [`MetaEngine::collect_garbage_batch`] calls.
+#[derive(Debug, Default)]
+pub struct GcPass {
+    started: bool,
+    failed_frames: HashSet<FrameId>,
+    failed_quarantine: HashSet<String>,
+}
+
 /// Statistics of one [`MetaEngine::collect_garbage`] pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GcReport {
@@ -1062,22 +1070,124 @@ impl MetaEngine {
     /// quarantine entries past their grace period and drop stale tombstones / idempotency
     /// records.
     pub fn collect_garbage(&mut self, _now_ms: u64) -> Result<GcReport> {
-        self.collect_garbage_batch(usize::MAX)
+        self.collect_garbage_batch(usize::MAX, &mut GcPass::default())
     }
 
-    /// [`Self::collect_garbage`] that stops after `max_deletions` physical deletions, so a caller
-    /// sharing the engine can release it in between.
+    /// One batch of a GC pass: [`Self::collect_garbage`] limited to `max_attempts` physical
+    /// deletions (successful or not; at least one), so a caller sharing the engine can release
+    /// it in between. Call it with the same `pass` until [`GcReport::more`] is false.
     ///
-    /// An object that cannot be destroyed is reported in [`GcReport::failures`], does not count
-    /// against the limit and does not stop the pass.
-    pub fn collect_garbage_batch(&mut self, max_deletions: usize) -> Result<GcReport> {
+    /// Only the first batch of a pass expires pins, marks reclaimable frames and drops stale
+    /// idempotency records and tombstones. An object that cannot be destroyed is reported in
+    /// [`GcReport::failures`] and not tried again in the same pass.
+    pub fn collect_garbage_batch(
+        &mut self,
+        max_attempts: usize,
+        pass: &mut GcPass,
+    ) -> Result<GcReport> {
         let now_ms = self.now_ms();
         let now_inst = self.clock.now_instant();
         let mut report = GcReport::default();
+        if !pass.started {
+            pass.started = true;
+            self.gc_expire_pins_and_mark_reclaimable(now_ms, now_inst, &mut report)?;
+            self.gc_drop_stale_records(now_ms, &mut report)?;
+        }
 
-        // 1. pins + 2. deferred deletes, in one transaction.
+        // Finish pending physical deletions.
+        let deleting: Vec<FrameRecord> = self
+            .frames()?
+            .into_iter()
+            .filter(|r| matches!(r.state, FrameState::Deleting { .. }))
+            .filter(|r| !pass.failed_frames.contains(&r.frame_id))
+            .collect();
+        let mut budget = max_attempts.max(1);
+        for rec in &deleting {
+            if budget == 0 {
+                report.more = true;
+                break;
+            }
+            budget -= 1;
+            match self.complete_deletion(rec) {
+                Ok(()) => report.frames_deleted += 1,
+                Err(e @ MetaError::Hook { .. }) => {
+                    report.failures.push(format!("frame {}: {e}", rec.frame_id));
+                    pass.failed_frames.insert(rec.frame_id);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Quarantine purge (physical delete first, record second: a crash in between only
+        // leaves a record whose purge hits NotFound next time). Due on the wall clock and on
+        // the monotonic clock: a wall clock that jumped ahead, or that moved on while agentd
+        // was down, cannot purge anything on its own.
+        let min_uptime_end = self
+            .opened_at
+            .checked_add(Duration::from_millis(self.cfg.quarantine_min_uptime_ms));
+        let due: Vec<QuarantineRecord> = self
+            .quarantine_records()?
+            .into_iter()
+            .filter(|r| {
+                let mono_due = self
+                    .quarantine_due
+                    .get(&tables::quarantine_key(r))
+                    .copied()
+                    .or(min_uptime_end);
+                now_ms >= r.purge_after_ms && mono_due.is_some_and(|t| now_inst >= t)
+            })
+            .filter(|r| !pass.failed_quarantine.contains(&tables::quarantine_key(r)))
+            .collect();
+        let qroot = self.cfg.quarantine_dir();
+        let mut purged = Vec::new();
+        for r in &due {
+            if budget == 0 {
+                report.more = true;
+                break;
+            }
+            budget -= 1;
+            let dir = qroot.join(r.quarantined_epoch.cgroup_dir_name());
+            let path = dir.join(r.file_name());
+            match ignore_not_found(self.hooks.purge_quarantined(&path)) {
+                Ok(()) => {
+                    purged.push(r);
+                    // Best effort: the epoch directory disappears once its last entry is purged.
+                    let _ = std::fs::remove_dir(&dir);
+                }
+                Err(e) => {
+                    report.failures.push(format!("{}: {e}", path.display()));
+                    pass.failed_quarantine.insert(tables::quarantine_key(r));
+                }
+            }
+        }
+        if !purged.is_empty() {
+            let tx = begin_write(&self.db)?;
+            {
+                let mut q = tx.open_table(QUARANTINE)?;
+                for r in &purged {
+                    q.remove(tables::quarantine_key(r).as_str())?;
+                }
+            }
+            for r in &purged {
+                self.quarantine_due.remove(&tables::quarantine_key(r));
+            }
+            tx.commit()?;
+            report.quarantine_purged = purged.len();
+        }
+        Ok(report)
+    }
+
+    /// GC step: expire pins and move unheld frames marked for reclaim to `Deleting`. Commits
+    /// only if something changed.
+    fn gc_expire_pins_and_mark_reclaimable(
+        &mut self,
+        now_ms: u64,
+        now_inst: Instant,
+        report: &mut GcReport,
+    ) -> Result<()> {
         let tx = begin_write(&self.db)?;
         let mut expired_pins = Vec::new();
+        let mut changed = false;
         {
             let mut frames = tx.open_table(FRAMES)?;
             let mut holds = tx.open_table(HOLDS)?;
@@ -1102,6 +1212,7 @@ impl MetaEngine {
                 }
             }
             report.pins_expired = expired_pins.len();
+            changed |= !expired_pins.is_empty();
             for (key, _mark) in tables::scan_json::<ReclaimMark, _>(&pending)? {
                 let frame = FrameId::from_base32(&key)
                     .map_err(|e| MetaError::Codec(format!("reclaim key {key:?}: {e}")))?;
@@ -1123,98 +1234,31 @@ impl MetaEngine {
                             };
                             tables::put_json(&mut frames, &key, &next)?;
                             pending.remove(key.as_str())?;
+                            changed = true;
                         }
                     }
                     _ => {
                         pending.remove(key.as_str())?;
+                        changed = true;
                     }
                 }
             }
+        }
+        if !changed {
+            // Nothing to write: skip the commit and its fsync.
+            tx.abort()?;
+            return Ok(());
         }
         tx.commit()?;
         for k in expired_pins {
             self.pin_leases.remove(&k);
         }
+        Ok(())
+    }
 
-        // 3. finish every pending physical deletion.
-        let deleting: Vec<FrameRecord> = self
-            .frames()?
-            .into_iter()
-            .filter(|r| matches!(r.state, FrameState::Deleting { .. }))
-            .collect();
-        let mut budget = max_deletions;
-        for rec in &deleting {
-            if budget == 0 {
-                report.more = true;
-                break;
-            }
-            match self.complete_deletion(rec) {
-                Ok(()) => {
-                    report.frames_deleted += 1;
-                    budget -= 1;
-                }
-                Err(e @ MetaError::Hook { .. }) => {
-                    report.failures.push(format!("frame {}: {e}", rec.frame_id));
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        // 4. quarantine purge (physical delete first, record second: a crash in between only
-        //    leaves a record whose purge hits NotFound next time).
-        // Due on the wall clock and on the monotonic clock: a wall clock that jumped ahead, or
-        // that moved on while agentd was down, cannot purge anything on its own.
-        let min_uptime_end = self
-            .opened_at
-            .checked_add(Duration::from_millis(self.cfg.quarantine_min_uptime_ms));
-        let due: Vec<QuarantineRecord> = self
-            .quarantine_records()?
-            .into_iter()
-            .filter(|r| {
-                let mono_due = self
-                    .quarantine_due
-                    .get(&tables::quarantine_key(r))
-                    .copied()
-                    .or(min_uptime_end);
-                now_ms >= r.purge_after_ms && mono_due.is_some_and(|t| now_inst >= t)
-            })
-            .collect();
-        let qroot = self.cfg.quarantine_dir();
-        let mut purged = Vec::new();
-        for r in &due {
-            if budget == 0 {
-                report.more = true;
-                break;
-            }
-            let dir = qroot.join(r.quarantined_epoch.cgroup_dir_name());
-            let path = dir.join(r.file_name());
-            match ignore_not_found(self.hooks.purge_quarantined(&path)) {
-                Ok(()) => {
-                    purged.push(r);
-                    budget -= 1;
-                    // Best effort: the epoch directory disappears once its last entry is purged.
-                    let _ = std::fs::remove_dir(&dir);
-                }
-                Err(e) => report.failures.push(format!("{}: {e}", path.display())),
-            }
-        }
-        if !purged.is_empty() {
-            let tx = begin_write(&self.db)?;
-            {
-                let mut q = tx.open_table(QUARANTINE)?;
-                for r in &purged {
-                    q.remove(tables::quarantine_key(r).as_str())?;
-                }
-            }
-            for r in &purged {
-                self.quarantine_due.remove(&tables::quarantine_key(r));
-            }
-            tx.commit()?;
-            report.quarantine_purged = purged.len();
-        }
-
-        // 5. idempotency records, then 6. tombstones: a tombstone stays while a kept key replays
-        //    to it.
+    /// GC step: drop idempotency records past their TTL, then tombstones past theirs that no
+    /// remaining record replays to. Commits only if something changed.
+    fn gc_drop_stale_records(&mut self, now_ms: u64, report: &mut GcReport) -> Result<()> {
         let tx = begin_write(&self.db)?;
         {
             let mut worlds = tx.open_table(WORLDS)?;
@@ -1251,8 +1295,12 @@ impl MetaEngine {
                 }
             }
         }
-        tx.commit()?;
-        Ok(report)
+        if report.idempotency_purged == 0 && report.tombstones_purged == 0 {
+            tx.abort()?;
+        } else {
+            tx.commit()?;
+        }
+        Ok(())
     }
 }
 

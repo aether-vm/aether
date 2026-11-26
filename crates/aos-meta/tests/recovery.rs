@@ -388,17 +388,34 @@ fn gc_batches_bound_deletions_and_get_past_undeletable_objects() {
     h.ctl.fail_destroy.store(false, Ordering::SeqCst);
     *h.ctl.fail_destroy_of.lock().unwrap() = Some(stuck);
 
-    let mut deleted = Vec::new();
+    // A failed attempt uses up budget like a successful one, and within one pass the failing
+    // object is not tried again.
+    let mut pass = aos_meta::GcPass::default();
+    let mut batches = Vec::new();
     loop {
-        let r = e.collect_garbage_batch(2).unwrap();
-        assert_eq!(r.failures.len(), 1);
-        deleted.push(r.frames_deleted);
+        let r = e.collect_garbage_batch(2, &mut pass).unwrap();
+        batches.push((r.frames_deleted, r.failures.len()));
         if !r.more {
             break;
         }
     }
-    assert_eq!(deleted, [2, 2], "4 of 5 frames, at most 2 at a time, then done");
+    assert_eq!(batches, [(1, 1), (2, 0), (1, 0)], "4 of 5 frames, 2 attempts at a time");
     assert!(e.frame(frames[0]).unwrap().is_some());
+    // The next pass tries it again.
+    let r = e.collect_garbage_batch(2, &mut aos_meta::GcPass::default()).unwrap();
+    assert_eq!((r.frames_deleted, r.failures.len(), r.more), (0, 1, false));
+}
+
+#[test]
+fn gc_batch_of_zero_still_makes_progress() {
+    let h = Harness::new("gc-batch-zero");
+    let (mut e, _) = h.open(boot_a());
+    let f = h.durable(&mut e);
+    h.ctl.fail_destroy.store(true, Ordering::SeqCst);
+    assert!(e.delete_frame(f, "alice", None).is_err());
+    h.ctl.fail_destroy.store(false, Ordering::SeqCst);
+    let r = e.collect_garbage_batch(0, &mut aos_meta::GcPass::default()).unwrap();
+    assert_eq!((r.frames_deleted, r.more), (1, false));
 }
 
 /// The grace period also runs on the monotonic clock: a wall clock jumping ahead (NTP after a
@@ -439,4 +456,21 @@ fn quarantine_from_an_earlier_run_waits_for_the_minimum_uptime() {
     assert_eq!(e.collect_garbage(h.clock.now_ms()).unwrap().quarantine_purged, 0);
     h.clock.advance(1);
     assert_eq!(e.collect_garbage(h.clock.now_ms()).unwrap().quarantine_purged, 1);
+}
+
+/// An idle pass changes nothing, so it must not commit (and fsync) anything either.
+#[test]
+fn an_idle_gc_pass_writes_nothing() {
+    let h = Harness::new("gc-idle");
+    let (mut e, _) = h.open(boot_a());
+    h.durable(&mut e);
+    e.collect_garbage(h.clock.now_ms()).unwrap();
+    let db = e.config().db_path();
+    let before = std::fs::metadata(&db).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    for _ in 0..3 {
+        let r = e.collect_garbage(h.clock.now_ms()).unwrap();
+        assert_eq!(r, aos_meta::GcReport::default());
+    }
+    assert_eq!(std::fs::metadata(&db).unwrap().modified().unwrap(), before);
 }
