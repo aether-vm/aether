@@ -1449,3 +1449,76 @@ async fn concurrent_destroys_remove_the_rootfs_only_after_the_sandbox() {
     );
 }
 
+/// Finishes an Exec in the sandbox, then holds its result until the test releases it.
+#[derive(Default)]
+struct LateExecResult {
+    inner: InMemorySandboxBackend,
+    finished: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl SandboxBackend for LateExecResult {
+    fn enabled_drivers(&self) -> Vec<String> {
+        self.inner.enabled_drivers()
+    }
+    fn spawn_world(&self, spec: SpawnWorldSpec) -> Result<(), BackendError> {
+        self.inner.spawn_world(spec)
+    }
+    fn exec(
+        &self,
+        world_id: WorldId,
+        req: SandboxExecRequest,
+        tx: tokio::sync::mpsc::Sender<SandboxOutputChunk>,
+    ) -> Result<SandboxExecResult, BackendError> {
+        let res = self.inner.exec(world_id, req, tx);
+        if let Some(done) = self.finished.lock().unwrap().take() {
+            let _ = done.send(());
+        }
+        if let Some(release) = self.release.lock().unwrap().take() {
+            let _ = release.recv();
+        }
+        res
+    }
+    fn freeze_and_sync(&self, world_id: WorldId, sync: bool) -> Result<bool, BackendError> {
+        self.inner.freeze_and_sync(world_id, sync)
+    }
+    fn unfreeze(&self, world_id: WorldId) -> Result<(), BackendError> {
+        self.inner.unfreeze(world_id)
+    }
+    fn destroy_world(&self, world_id: WorldId) -> Result<(), BackendError> {
+        self.inner.destroy_world(world_id)
+    }
+}
+
+/// The Exec cache lives as long as the world; a result arriving after teardown must not refill it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exec_result_arriving_after_destroy_is_not_cached() {
+    let env = TestEnv::new("exec-cache-race");
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let sandbox = Arc::new(LateExecResult {
+        finished: std::sync::Mutex::new(Some(finished_tx)),
+        release: std::sync::Mutex::new(Some(release_rx)),
+        ..Default::default()
+    });
+    let svc = env.boot_service_with(sandbox);
+    let base = import_base(&svc, "bob").await;
+    let w = running_world(&svc, &base, "cw").await;
+    let req = ExecRequest {
+        idempotency_key: Some(IdempotencyKey {
+            owner: "bob".into(),
+            request_id: "x".into(),
+        }),
+        ..exec_req(&w, 0)
+    };
+    let stream = svc.exec(Request::new(req)).await.unwrap().into_inner();
+    tokio::task::spawn_blocking(move || finished_rx.recv().unwrap())
+        .await
+        .unwrap();
+    svc.destroy_world(Request::new(destroy_req(&w, None)))
+        .await
+        .unwrap();
+    release_tx.send(()).unwrap();
+    let _: Vec<_> = stream.collect().await;
+    assert_eq!(svc.cached_exec_count(), 0, "a destroyed world's Exec stayed cached");
+}

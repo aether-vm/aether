@@ -244,6 +244,13 @@ impl AgentdService {
         Ok(binding)
     }
 
+    /// Number of cached `Exec` results (for tests).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn cached_exec_count(&self) -> usize {
+        self.inner.exec_cache.lock().unwrap().len()
+    }
+
     /// End every world whose lease ran out and tear down its sandbox, rootfs and gateway binding.
     ///
     /// Worlds with an in-flight `CreateWorld`, `Exec` or `Checkpoint` are postponed until it ends.
@@ -1664,13 +1671,18 @@ impl WorldService for AgentdService {
                 Ok(Ok(res)) => {
                     let proto_res = sandbox_exec_to_proto(res);
                     if let Some(k) = idem {
-                        inner.exec_cache.lock().unwrap().insert(
-                            (wid, k.owner, k.request_id),
-                            CachedExec {
-                                request_digest: digest,
-                                result: proto_res.clone(),
-                            },
-                        );
+                        // Checked under the cache lock: teardown drops the world from
+                        // `live_worlds` before it clears the world's cache entries.
+                        let mut cache = inner.exec_cache.lock().unwrap();
+                        if inner.live_worlds.lock().unwrap().contains_key(&wid) {
+                            cache.insert(
+                                (wid, k.owner, k.request_id),
+                                CachedExec {
+                                    request_digest: digest,
+                                    result: proto_res.clone(),
+                                },
+                            );
+                        }
                     }
                     let _ = tx
                         .send(Ok(ExecEvent {
