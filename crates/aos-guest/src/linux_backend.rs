@@ -350,6 +350,7 @@ impl GuestBackend for LinuxGuestBackend {
         if let Some(cg) = &self.inherited_exec {
             linux_sys::attach_child_to_cgroup_fd(&mut cmd, cg.procs.as_raw_fd());
         }
+        linux_sys::prefer_child_for_oom_kill(&mut cmd);
 
         let spawn_guard = linux_sys::begin_child_spawn();
         let mut child = match cmd.spawn() {
@@ -559,6 +560,7 @@ impl GuestBackend for LinuxGuestBackend {
                 BackendError::new(ErrorCode::PreFreezeHookFailed, e.to_string())
             })?;
         }
+        linux_sys::prefer_child_for_oom_kill(&mut cmd);
 
         let spawn_guard = linux_sys::begin_child_spawn();
         let mut child = match cmd.spawn() {

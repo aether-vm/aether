@@ -332,6 +332,17 @@ fn exec_without_room_for_drain_threads_fails_and_keeps_the_world() {
 }
 
 #[test]
+fn the_oom_killer_prefers_the_workload_over_aos_guest() {
+    let Some(scratch) = Scratch::new("oom-adj") else {
+        return;
+    };
+    let mut world = NamespaceDriver::new().spawn_world(scratch.spec()).unwrap();
+    let r = sh(&mut world, "adj", "cat /proc/self/oom_score_adj /proc/1/oom_score_adj");
+    assert_eq!(stdout(&r), "500\n0", "{r:?}");
+    world.destroy().unwrap();
+}
+
+#[test]
 fn explicit_limits_contain_memory_hog_and_write_cpu_max() {
     let Some(scratch) = Scratch::new("mem") else {
         return;

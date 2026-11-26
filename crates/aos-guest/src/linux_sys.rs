@@ -572,6 +572,53 @@ pub fn attach_child_to_cgroup_fd(cmd: &mut Command, procs_fd: RawFd) {
     }
 }
 
+/// Value the workload gets in `/proc/self/oom_score_adj`, so a world-wide OOM picks it before
+/// aos-guest (whose death ends the world) even when its own RSS is small.
+const WORKLOAD_OOM_SCORE_ADJ: &[u8] = b"500\n";
+
+/// Attach a `pre_exec` hook raising the child's `oom_score_adj` to [`WORKLOAD_OOM_SCORE_ADJ`].
+/// Raising it needs no privilege; the child can lower it again, but only back to aos-guest's.
+pub fn prefer_child_for_oom_kill(cmd: &mut Command) {
+    // SAFETY: The closure runs between `fork` and `exec` and invokes only async-signal-safe
+    // syscalls (`open`, `write`, `close`) on a static path and payload.
+    unsafe {
+        cmd.pre_exec(|| {
+            let fd = libc::open(
+                c"/proc/self/oom_score_adj".as_ptr(),
+                libc::O_WRONLY | libc::O_CLOEXEC,
+            );
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let res = write_all_at_start(fd, WORKLOAD_OOM_SCORE_ADJ);
+            libc::close(fd);
+            res
+        });
+    }
+}
+
+/// `pwrite(fd, payload, 0)` until it is complete, retrying `EINTR`. Async-signal-safe.
+fn write_all_at_start(fd: RawFd, payload: &[u8]) -> io::Result<()> {
+    loop {
+        // SAFETY: `payload` is a valid slice for the duration of the call.
+        let written = unsafe {
+            libc::pwrite(fd, payload.as_ptr().cast::<libc::c_void>(), payload.len(), 0)
+        };
+        if written < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        if written as usize != payload.len() {
+            // `io::Error::new` would allocate, which is not safe after `fork`.
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        return Ok(());
+    }
+}
+
 /// Attach a `pre_exec` hook placing the forked child into `<sub_cgroup>/cgroup.procs`
 /// before `execve` runs so the entire process tree is contained from its first instruction.
 pub fn attach_child_to_cgroup(cmd: &mut Command, cgroup_procs_path: PathBuf) -> io::Result<()> {
