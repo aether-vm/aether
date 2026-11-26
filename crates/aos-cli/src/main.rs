@@ -664,7 +664,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Cmd::World { sub } => {
-            let mut c = WorldServiceClient::new(channel);
+            let mut c = WorldServiceClient::new(channel.clone());
             match sub {
                 WorldCmd::Create {
                     base,
@@ -788,6 +788,26 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     request_id,
                     argv,
                 } => {
+                    if detach {
+                        // Older daemons ignore the field and would run the command in the
+                        // foreground.
+                        let resp = SystemServiceClient::new(channel)
+                            .negotiate_version(NegotiateVersionRequest {
+                                client_name: "aos-cli".into(),
+                                client_version: env!("CARGO_PKG_VERSION").into(),
+                                supported_api_major: SUPPORTED_API_MAJOR,
+                            })
+                            .await
+                            .map_err(|s| anyhow!("{}", format_status(&s)))?
+                            .into_inner();
+                        if resp.api_minor < 1 {
+                            return Err(anyhow!(
+                                "--detach requires a daemon with api_minor >= 1 (daemon serves v{}.{})",
+                                resp.api_major,
+                                resp.api_minor
+                            ));
+                        }
+                    }
                     let mut stream = c
                         .exec(ExecRequest {
                             world_id,
