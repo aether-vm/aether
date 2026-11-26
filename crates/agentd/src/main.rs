@@ -75,7 +75,8 @@ struct Cli {
     /// Disable `CLONE_NEWUSER` in `production` mode (testing ONLY).
     #[arg(long, default_value_t = false)]
     no_userns: bool,
-    /// Per-world memory limit in MiB for `production` mode (`0` = unlimited; swap is disabled).
+    /// Per-world memory limit in MiB for `production` mode; swap is disabled along with it
+    /// (`0` = unlimited memory and swap).
     #[arg(long, default_value_t = 2048)]
     world_memory_max_mib: u64,
     /// Per-world limit on processes and threads for `production` mode (`0` = unlimited).
