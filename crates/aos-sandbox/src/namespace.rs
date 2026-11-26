@@ -324,6 +324,9 @@ mod linux_impl {
                 spec.rootfs_dir
             )));
         }
+        if remap_root {
+            require_root_only_ancestor(&spec.rootfs_dir)?;
+        }
 
         // 1. Prepare per-epoch / per-world cgroup v2 directory.
         let world_cgroup = if spec.enable_cgroup {
@@ -593,6 +596,27 @@ mod linux_impl {
             }
         }
         Ok(())
+    }
+
+    /// The idmapped rootfs keeps on-disk ownership unshifted, so a setuid file the sandbox
+    /// creates is setuid-root on the host. Only root may be able to reach it.
+    fn require_root_only_ancestor(rootfs_dir: &Path) -> Result<(), SandboxError> {
+        use std::os::unix::fs::MetadataExt;
+        let canonical = fs::canonicalize(rootfs_dir).map_err(|e| {
+            SandboxError::InvalidConfig(format!("failed to resolve rootfs_dir {rootfs_dir:?}: {e}"))
+        })?;
+        for dir in canonical.ancestors().skip(1) {
+            let meta = fs::metadata(dir).map_err(|e| {
+                SandboxError::InvalidConfig(format!("failed to stat {dir:?}: {e}"))
+            })?;
+            if meta.uid() == 0 && meta.mode() & 0o077 == 0 {
+                return Ok(());
+            }
+        }
+        Err(SandboxError::InvalidConfig(format!(
+            "rootfs_dir {rootfs_dir:?} needs a root-owned ancestor with mode 0700: files the \
+             sandbox makes setuid are setuid-root on the host"
+        )))
     }
 
     /// A root `agentd` must back sandbox ids with unprivileged host ids. On-disk ownership stays

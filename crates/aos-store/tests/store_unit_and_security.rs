@@ -88,6 +88,23 @@ fn raw_tar_entry(
     out
 }
 
+/// Setuid files planted by a sandbox keep host ownership, so nobody else may traverse the pool.
+#[cfg(unix)]
+#[test]
+fn open_restricts_an_existing_world_readable_pool_to_its_owner() {
+    use std::os::unix::fs::PermissionsExt;
+    let pool_root = scratch_dir("perms").join("pool");
+    for dir in [pool_root.clone(), pool_root.join("worlds")] {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    TreeStore::open(TreeStoreConfig::for_testing(&pool_root)).unwrap();
+    for rel in ["", "objects", "worlds", "quarantine"] {
+        let mode = std::fs::metadata(pool_root.join(rel)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "pool/{rel} mode {mode:o}");
+    }
+}
+
 #[test]
 fn import_clone_snapshot_export_patch_and_destroy_lifecycle() {
     let root = scratch_dir("lifecycle");

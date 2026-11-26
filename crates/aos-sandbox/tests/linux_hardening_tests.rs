@@ -172,6 +172,44 @@ fn root_agentd_maps_sandbox_root_to_unprivileged_host_ids() {
 }
 
 #[test]
+fn rootfs_reachable_by_other_host_users_is_rejected() {
+    let Some(scratch) = Scratch::new("perms") else {
+        return;
+    };
+    // A setuid binary planted by the world would be setuid-root for every host user.
+    fs::set_permissions(&scratch.base, fs::Permissions::from_mode(0o755)).unwrap();
+    let err = NamespaceDriver::new().spawn_world(scratch.spec()).err();
+    assert!(
+        matches!(&err, Some(SandboxError::InvalidConfig(m)) if m.contains("0700")),
+        "world-reachable rootfs must be rejected, got {err:?}"
+    );
+}
+
+#[test]
+fn setuid_file_planted_by_the_world_is_unusable_by_other_host_users() {
+    let Some(scratch) = Scratch::new("setuid") else {
+        return;
+    };
+    let mut world = NamespaceDriver::new().spawn_world(scratch.spec()).unwrap();
+    let r = sh(&mut world, "plant", "cp /bin/busybox /pwn && chmod 4755 /pwn && chmod 755 /");
+    assert_eq!(r.exit_code, Some(0), "{r:?}");
+    world.destroy().unwrap();
+    let pwn = scratch.rootfs().join("pwn");
+    let m = fs::metadata(&pwn).unwrap();
+    assert_eq!((m.uid(), m.mode() & 0o4000), (0, 0o4000), "precondition: setuid-root on disk");
+    // From a shell: `setpriv` itself still traverses 0700 directories while it execs.
+    let out = Command::new("setpriv")
+        .args(["--reuid=65534", "--regid=65534", "--clear-groups", "sh", "-c", "exec \"$0\" id"])
+        .arg(&pwn)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("Permission denied"),
+        "host user nobody reached the planted setuid file: {out:?}"
+    );
+}
+
+#[test]
 fn bind_mounted_host_agent_works_from_root_only_dir_and_stays_readonly() {
     let Some(scratch) = Scratch::new("agent") else {
         return;

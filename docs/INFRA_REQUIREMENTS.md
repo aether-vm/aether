@@ -125,8 +125,8 @@ sudo chmod 0440 /etc/sudoers.d/90-forkloom-dev && sudo visudo -c
 sudo mkfs.btrfs -f -L forkloom-pool /dev/nvme0n1p3
 sudo mkfs.xfs  -f -m reflink=1 -L forkloom-xfs /dev/nvme0n1p4
 sudo mkdir -p /var/lib/forkloom/{meta,pool,volatile} /var/lib/forkloom-xfs-ctl
-# 用 UUID 写入 fstab（noatime；不加 autodefrag；不启用 qgroups）
-echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme0n1p3) /var/lib/forkloom/pool btrfs noatime 0 0" | sudo tee -a /etc/fstab
+# 用 UUID 写入 fstab（noatime；nosuid,nodev：沙箱写入的文件保留宿主属主，agentd 另把 pool 目录设为 0700；不加 autodefrag；不启用 qgroups）
+echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme0n1p3) /var/lib/forkloom/pool btrfs noatime,nosuid,nodev 0 0" | sudo tee -a /etc/fstab
 echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme0n1p4) /var/lib/forkloom-xfs-ctl xfs noatime 0 0" | sudo tee -a /etc/fstab
 sudo mount -a
 
@@ -134,7 +134,7 @@ sudo mount -a
 sudo mkdir -p /var/lib/forkloom/{meta,pool,volatile} /var/lib/forkloom/img
 sudo truncate -s 12G /var/lib/forkloom/img/pool.img        # WSL2 默认 12G，上限 16G
 sudo mkfs.btrfs -f -L forkloom-pool /var/lib/forkloom/img/pool.img
-sudo mount -o loop,noatime /var/lib/forkloom/img/pool.img /var/lib/forkloom/pool
+sudo mount -o loop,noatime,nosuid,nodev /var/lib/forkloom/img/pool.img /var/lib/forkloom/pool
 # 注意：pool.img 与 meta/ 虽同在根盘 ext4，但 pool 内部是独立 Btrfs 文件系统，
 #       满足"meta 与 pool 分文件系统"的功能语义；性能数字仍不可发布。
 

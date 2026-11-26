@@ -133,6 +133,17 @@ impl TreeStore {
             })?;
         }
 
+        // Sandboxes write through idmapped mounts, so a file a world makes setuid is setuid-root
+        // on disk. Only the pool owner may reach it.
+        #[cfg(unix)]
+        for dir in [PathBuf::new(), OBJECTS_DIR.into(), WORLDS_DIR.into(), QUARANTINE_DIR.into()] {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = cfg.pool_root.join(dir);
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|e| {
+                StoreError::io_or_enospc(format!("restricting {} to 0700", dir.display()), e)
+            })?;
+        }
+
         let store = Self {
             pool_root: cfg.pool_root,
             ballast_bytes: cfg.ballast_bytes,
