@@ -256,13 +256,13 @@ impl AgentdService {
     /// Release everything a world that already ended in `meta` still occupies.
     fn teardown_world(&self, wid: WorldId) {
         if let Err(e) = self.inner.sandbox.destroy_world(wid) {
-            tracing::warn!("destroying sandbox of world {wid} failed: {e}");
+            eprintln!("agentd: destroying sandbox of world {wid} failed: {e}");
         }
         let live = self.inner.live_worlds.lock().unwrap().remove(&wid);
         if let Some(live) = live
             && let Err(e) = self.inner.tree.destroy_subvolume(&live.rootfs_path)
         {
-            tracing::warn!("destroying rootfs of world {wid} failed: {e}");
+            eprintln!("agentd: destroying rootfs of world {wid} failed: {e}");
         }
         if let Some(slot_id) = self.inner.world_slots.lock().unwrap().remove(&wid) {
             self.inner.gateway_fence.revoke_slot(&slot_id);
@@ -272,7 +272,7 @@ impl AgentdService {
             match audit.crypto_shred(wid) {
                 Ok(()) | Err(GwError::AuditKeyMissing { .. }) => {}
                 Err(e) => {
-                    tracing::warn!("audit crypto_shred for world {wid} returned error: {e}");
+                    eprintln!("agentd: audit crypto_shred for world {wid} returned error: {e}");
                 }
             }
         }
@@ -1376,7 +1376,7 @@ impl WorldService for AgentdService {
         let abort = || {
             let mut meta = self.inner.meta.lock().unwrap();
             if let Err(e) = meta.abort_create_world(world_rec.world_id, &req.owner, idem.as_ref()) {
-                tracing::warn!("aborting world {} failed: {e}", world_rec.world_id);
+                eprintln!("agentd: aborting world {} failed: {e}", world_rec.world_id);
             }
         };
 

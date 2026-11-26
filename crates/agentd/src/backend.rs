@@ -1299,9 +1299,11 @@ impl SandboxBackend for NamespaceSandboxBackend {
     fn destroy_world(&self, world_id: WorldId) -> Result<(), BackendError> {
         let removed = self.worlds.lock().unwrap().remove(&world_id);
         if let Some(world) = removed {
-            // Kill first: an in-flight Exec holds the handle until its processes are gone.
+            // Kill first: an in-flight Exec holds the handle until its processes are gone. A
+            // world frozen for a checkpoint is thawed so its killed tasks can exit.
             if let Some(cg) = &world.cgroup {
                 let _ = fs::write(cg.join("cgroup.kill"), "1");
+                let _ = fs::write(cg.join("cgroup.freeze"), "0");
             }
             let mut handle = world.handle.lock().unwrap();
             handle.destroy().map_err(map_sandbox_error)?;

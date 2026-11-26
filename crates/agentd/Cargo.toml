@@ -33,7 +33,6 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic.workspace = true
-tracing.workspace = true
 
 [build-dependencies]
 protoc-bin-vendored = "3"
