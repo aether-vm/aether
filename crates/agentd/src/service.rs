@@ -55,6 +55,9 @@ pub const DEFAULT_MAX_IMPORT_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_WORLD_LEASE_TTL_MS: u64 = 10 * 60 * 1000;
 /// Default `Exec` timeout when caller omits `timeout_ms` (60 seconds).
 pub const DEFAULT_EXEC_TIMEOUT_MS: u64 = 60 * 1000;
+/// Longest `Exec` timeout accepted (1 hour). A running `Exec` postpones the lease reaper, so
+/// this bounds how long a world can outlive its lease.
+pub const MAX_EXEC_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 /// How long starting a detached command may take.
 const DETACHED_START_TIMEOUT_MS: u64 = 10 * 1000;
 /// Default `Exec` max retained bytes per stream (64 KiB).
@@ -1531,6 +1534,14 @@ impl WorldService for AgentdService {
                 Code::InvalidArgument,
                 ErrorCode::InvalidArgument,
                 "a detached Exec runs until its world ends; timeout_ms must be 0",
+                wid.to_string(),
+            ));
+        }
+        if req.timeout_ms > MAX_EXEC_TIMEOUT_MS {
+            return Err(simple_status(
+                Code::InvalidArgument,
+                ErrorCode::InvalidArgument,
+                format!("Exec timeout_ms must not exceed {MAX_EXEC_TIMEOUT_MS}"),
                 wid.to_string(),
             ));
         }

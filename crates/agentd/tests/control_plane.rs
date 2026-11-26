@@ -1295,3 +1295,61 @@ async fn detached_exec_rejects_timeouts_and_is_part_of_the_idempotency_digest() 
         ErrorCode::IdempotencyConflict as i32
     );
 }
+
+async fn running_world(svc: &AgentdService, base: &str, request_id: &str) -> proto::WorldInfo {
+    svc.create_world(Request::new(keyed_create(base, request_id)))
+        .await
+        .unwrap()
+        .into_inner()
+        .world
+        .unwrap()
+}
+
+fn exec_req(w: &proto::WorldInfo, timeout_ms: u64) -> ExecRequest {
+    ExecRequest {
+        world_id: w.world_id.clone(),
+        owner: "bob".into(),
+        fencing_token: w.fencing_token,
+        argv: vec!["true".into()],
+        timeout_ms,
+        ..Default::default()
+    }
+}
+
+fn destroy_req(w: &proto::WorldInfo, request_id: Option<&str>) -> DestroyWorldRequest {
+    DestroyWorldRequest {
+        world_id: w.world_id.clone(),
+        owner: "bob".into(),
+        fencing_token: w.fencing_token,
+        idempotency_key: request_id.map(|id| IdempotencyKey {
+            owner: "bob".into(),
+            request_id: id.into(),
+        }),
+    }
+}
+
+/// An Exec in flight keeps the lease reaper away, so how long it may run is bounded.
+#[tokio::test]
+async fn exec_timeout_above_one_hour_is_rejected() {
+    let env = TestEnv::new("exec-cap");
+    let svc = env.boot_service();
+    let base = import_base(&svc, "bob").await;
+    let w = running_world(&svc, &base, "cw").await;
+    let err = svc
+        .exec(Request::new(exec_req(&w, 60 * 60 * 1000 + 1)))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        decode_error_detail(&err).unwrap().code,
+        ErrorCode::InvalidArgument as i32
+    );
+    let mut stream = svc
+        .exec(Request::new(exec_req(&w, 60 * 60 * 1000)))
+        .await
+        .unwrap()
+        .into_inner();
+    while let Some(ev) = stream.next().await {
+        ev.unwrap();
+    }
+}
+
