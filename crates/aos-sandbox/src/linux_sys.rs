@@ -19,7 +19,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::seccomp::{
     CLONE_NEWIPC, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWUSER, CLONE_NEWUTS, SockFilter,
@@ -237,6 +237,45 @@ pub fn create_cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     }
     // SAFETY: Both descriptors were freshly created by `pipe2`.
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// Read `fd` to EOF, failing with `TimedOut` once `timeout` has passed.
+pub fn read_to_end_within(fd: OwnedFd, timeout: Duration) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let deadline = Instant::now() + timeout;
+    let mut file = File::from(fd);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 64];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let mut pfd = libc::pollfd {
+            fd: file.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = remaining.as_millis().clamp(1, i32::MAX as u128) as libc::c_int;
+        // SAFETY: `pfd` is one valid `pollfd` for the duration of the call.
+        let rc = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        if rc == 0 {
+            continue;
+        }
+        match file.read(&mut buf) {
+            Ok(0) => return Ok(out),
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Open a directory fd with `O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`.
@@ -959,4 +998,25 @@ pub fn spawn_isolated_child(
         unsafe { run_child_setup(plan, guest_sock_fd, sync_rd_fd, err_wr_fd) };
     }
     Ok(pid as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    #[test]
+    fn read_to_end_within_stops_at_the_deadline_while_the_writer_stays_open() {
+        let (rd, wr) = create_cloexec_pipe().unwrap();
+        let start = std::time::Instant::now();
+        let err = read_to_end_within(rd, Duration::from_millis(100)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        drop(wr);
+
+        let (rd, wr) = create_cloexec_pipe().unwrap();
+        File::from(wr).write_all(b"stage").unwrap();
+        assert_eq!(read_to_end_within(rd, Duration::from_secs(5)).unwrap(), b"stage");
+    }
 }

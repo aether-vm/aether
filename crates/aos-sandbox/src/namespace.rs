@@ -49,7 +49,7 @@ impl SandboxDriver for NamespaceDriver {
 mod linux_impl {
     use std::ffi::CString;
     use std::fs::{self, File, OpenOptions};
-    use std::io::{self, Read, Write};
+    use std::io::{self, Write};
     use std::os::fd::{AsRawFd, OwnedFd, RawFd};
     use std::path::{Path, PathBuf};
     use std::thread;
@@ -430,15 +430,15 @@ mod linux_impl {
             }
         }
 
-        // 7. Read child error pipe until EOF (FD_CLOEXEC closes it automatically on execve).
-        let mut err_buf = Vec::new();
-        {
-            let mut err_file = File::from(err_rd);
-            if let Err(e) = err_file.read_to_end(&mut err_buf) {
+        // 7. Read child error pipe until EOF (FD_CLOEXEC closes it automatically on execve). A
+        //    child stuck before `execve` must not block the caller forever.
+        let err_buf = match linux_sys::read_to_end_within(err_rd, spec.handshake_timeout) {
+            Ok(buf) => buf,
+            Err(e) => {
                 cleanup_on_error(world_cgroup.as_ref());
                 return Err(SandboxError::spawn("err_pipe_read", e));
             }
-        }
+        };
         if !err_buf.is_empty() {
             cleanup_on_error(world_cgroup.as_ref());
             if err_buf.len() >= 8 {
