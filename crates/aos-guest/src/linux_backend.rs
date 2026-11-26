@@ -379,12 +379,22 @@ impl GuestBackend for LinuxGuestBackend {
         let mut cgroup_killed = false;
         let mut stream_err: Option<io::Error> = None;
 
-        let (stdout_res, stderr_res, status_res) = thread::scope(|scope| {
+        let scoped = thread::scope(|scope| {
             let tx_out = tx.clone();
             let max_bytes = spec.max_output_bytes;
             let chunk_bytes = spec.stream_chunk_bytes;
+            // The workload shares `pids.max` with aos-guest, so thread creation can fail here;
+            // `scope.spawn` would panic and take PID 1 (and the world) down with it.
+            let mut abort = |e: io::Error| {
+                self.kill_exec(sub_cgroup.as_deref(), true);
+                let _ = child.kill();
+                let _ = child.wait();
+                // A drain thread that did start ends at EOF once its chunks are taken.
+                while rx.recv().is_ok() {}
+                Err(e)
+            };
 
-            let stdout_handle = scope.spawn(move || -> io::Result<BoundedOutput> {
+            let stdout_handle = match thread::Builder::new().spawn_scoped(scope, move || -> io::Result<BoundedOutput> {
                 let res = match stdout_pipe {
                     Some(pipe) => drain_stream(pipe, max_bytes, chunk_bytes, |chunk| {
                         // Ignore send error if receiver dropped; keep draining pipe to EOF.
@@ -395,10 +405,16 @@ impl GuestBackend for LinuxGuestBackend {
                 };
                 drop(tx_out);
                 res
-            });
+            }) {
+                Ok(h) => h,
+                Err(e) => {
+                    drop(tx);
+                    return abort(e);
+                }
+            };
 
             let tx_err = tx;
-            let stderr_handle = scope.spawn(move || -> io::Result<BoundedOutput> {
+            let stderr_handle = match thread::Builder::new().spawn_scoped(scope, move || -> io::Result<BoundedOutput> {
                 let res = match stderr_pipe {
                     Some(pipe) => drain_stream(pipe, max_bytes, chunk_bytes, |chunk| {
                         let _ = tx_err.send((OutputStream::Stderr, chunk.to_vec()));
@@ -408,7 +424,10 @@ impl GuestBackend for LinuxGuestBackend {
                 };
                 drop(tx_err);
                 res
-            });
+            }) {
+                Ok(h) => h,
+                Err(e) => return abort(e),
+            };
 
             let deadline = spec.timeout.map(|limit| Instant::now() + limit);
             let mut exited_status: Option<io::Result<std::process::ExitStatus>> = None;
@@ -474,8 +493,14 @@ impl GuestBackend for LinuxGuestBackend {
                 .join()
                 .unwrap_or_else(|_| Err(io::Error::other("stderr drain thread panicked")));
 
-            (out_res, err_res, status)
+            Ok((out_res, err_res, status))
         });
+        let (stdout_res, stderr_res, status_res) = scoped.map_err(|e| {
+            BackendError::new(
+                ErrorCode::ExecFailed,
+                format!("cannot start an output drain thread: {e}"),
+            )
+        })?;
 
         if let Some(cb_err) = stream_err {
             return Err(BackendError::new(

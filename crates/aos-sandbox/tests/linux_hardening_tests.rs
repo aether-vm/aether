@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use aos_guest::ErrorCode;
 use aos_sandbox::{
     DEFAULT_CGROUP_SLICE_ROOT, ExecReply, ExecRequest, GuestAgentSource, IdMapRange, NamespaceDriver, ResourceLimits,
     SandboxDriver, SandboxError, SpawnWorldSpec, WorldHandle,
@@ -304,6 +305,30 @@ fn default_pids_limit_contains_a_fork_bomb() {
     assert!(!events.contains("max 0"), "pids.max was never hit: {events}");
     assert_eq!(world.ping(7).expect("world survives").nonce, 7);
     world.destroy().unwrap();
+}
+
+#[test]
+fn exec_without_room_for_drain_threads_fails_and_keeps_the_world() {
+    let Some(scratch) = Scratch::new("pids-tight") else {
+        return;
+    };
+    // aos-guest's main and reaper threads plus the Exec child leave room for one drain thread
+    // at 4 and for none at 3.
+    for pids_max in [3, 4] {
+        let mut spec = scratch.spec();
+        spec.limits.pids_max = Some(pids_max);
+        let mut world = NamespaceDriver::new().spawn_world(spec).unwrap();
+        let err = world
+            .exec(ExecRequest::new("tight", vec!["/bin/true".into()]))
+            .err();
+        assert!(
+            matches!(&err, Some(SandboxError::GuestError { code: ErrorCode::ExecFailed, message })
+                if message.contains("drain thread")),
+            "pids.max {pids_max}: {err:?}"
+        );
+        assert_eq!(world.ping(5).expect("aos-guest survives").nonce, 5);
+        world.destroy().unwrap();
+    }
 }
 
 #[test]
