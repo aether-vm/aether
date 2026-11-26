@@ -1522,3 +1522,11 @@ async fn an_exec_result_arriving_after_destroy_is_not_cached() {
     let _: Vec<_> = stream.collect().await;
     assert_eq!(svc.cached_exec_count(), 0, "a destroyed world's Exec stayed cached");
 }
+
+/// An operation that waited for a world being destroyed reports it as not running.
+#[test]
+fn a_world_destroyed_under_an_operation_is_not_running() {
+    let w = WorldId::random();
+    let err = agentd::backend::map_sandbox_error(w, aos_sandbox::SandboxError::WorldDestroyed);
+    assert!(matches!(err, BackendError::WorldNotRunning(id) if id == w), "{err:?}");
+}

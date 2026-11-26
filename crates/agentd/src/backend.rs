@@ -785,11 +785,14 @@ pub fn map_store_error(err: StoreError) -> BackendError {
 
 /// Convert an [`aos_sandbox::SandboxError`] into a control-plane [`BackendError`].
 #[must_use]
-pub fn map_sandbox_error(err: SandboxError) -> BackendError {
+///
+/// `world_id` is the world the operation was for: one destroyed while the operation waited for
+/// it is not running, as if it had been gone already.
+pub fn map_sandbox_error(world_id: WorldId, err: SandboxError) -> BackendError {
     match err {
         SandboxError::UnsupportedPlatform(msg) => BackendError::DriverUnavailable(msg.to_owned()),
         SandboxError::InvalidConfig(msg) => BackendError::InvalidArgument(msg),
-        SandboxError::WorldDestroyed => BackendError::Internal("world already destroyed".into()),
+        SandboxError::WorldDestroyed => BackendError::WorldNotRunning(world_id),
         SandboxError::SpawnFailed { .. }
         | SandboxError::Cgroup { .. }
         | SandboxError::HandshakeFailed(_)
@@ -1212,7 +1215,7 @@ impl SandboxBackend for NamespaceSandboxBackend {
         let handle = self
             .driver
             .spawn_world(drv_spec)
-            .map_err(map_sandbox_error)?;
+            .map_err(|e| map_sandbox_error(spec.world_id, e))?;
         let world = NamespaceWorld {
             cgroup: handle.info().cgroup_path.clone(),
             handle: Arc::new(Mutex::new(handle)),
@@ -1251,9 +1254,9 @@ impl SandboxBackend for NamespaceSandboxBackend {
                         data: chunk.data,
                     });
                 })
-                .map_err(map_sandbox_error)?
+                .map_err(|e| map_sandbox_error(world_id, e))?
         } else {
-            handle.exec(sbx_req).map_err(map_sandbox_error)?
+            handle.exec(sbx_req).map_err(|e| map_sandbox_error(world_id, e))?
         };
 
         let map_bounded = |b: aos_guest::BoundedOutput| BoundedOutput {
@@ -1284,7 +1287,7 @@ impl SandboxBackend for NamespaceSandboxBackend {
         } else {
             FreezeOptions::default()
         };
-        let reply = handle.freeze_and_sync(opts).map_err(map_sandbox_error)?;
+        let reply = handle.freeze_and_sync(opts).map_err(|e| map_sandbox_error(world_id, e))?;
         Ok(reply.disk_clean)
     }
 
@@ -1293,7 +1296,7 @@ impl SandboxBackend for NamespaceSandboxBackend {
         let mut handle = world_arc.lock().unwrap();
         handle
             .unfreeze(Duration::from_secs(5))
-            .map_err(map_sandbox_error)
+            .map_err(|e| map_sandbox_error(world_id, e))
     }
 
     fn destroy_world(&self, world_id: WorldId) -> Result<(), BackendError> {
@@ -1306,7 +1309,7 @@ impl SandboxBackend for NamespaceSandboxBackend {
                 let _ = fs::write(cg.join("cgroup.freeze"), "0");
             }
             let mut handle = world.handle.lock().unwrap();
-            handle.destroy().map_err(map_sandbox_error)?;
+            handle.destroy().map_err(|e| map_sandbox_error(world_id, e))?;
         }
         Ok(())
     }
