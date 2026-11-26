@@ -386,6 +386,10 @@ fn the_oom_killer_prefers_the_workload_over_aos_guest() {
     let mut world = NamespaceDriver::new().spawn_world(scratch.spec()).unwrap();
     let r = sh(&mut world, "adj", "cat /proc/self/oom_score_adj /proc/1/oom_score_adj");
     assert_eq!(stdout(&r), "500\n0", "{r:?}");
+    detach(&mut world, &["/bin/sh", "-c", "cat /proc/self/oom_score_adj > /tmp/adj.part && mv /tmp/adj.part /tmp/adj"])
+        .unwrap();
+    let r = sh(&mut world, "adj-detached", "for i in $(seq 50); do [ -e /tmp/adj ] && break; sleep 0.1; done; cat /tmp/adj");
+    assert_eq!(stdout(&r), "500", "detached service: {r:?}");
     world.destroy().unwrap();
 }
 
@@ -694,5 +698,30 @@ fn detached_processes_share_the_world_pids_limit() {
     }
     assert!(refused >= 28, "only {refused} of 60 detached commands were refused");
     assert_eq!(world.ping(5).expect("aos-guest survives").nonce, 5);
+
+    // With one or two task slots left a foreground Exec can start its child but not both output
+    // drain threads; it must fail on its own and leave aos-guest and the services running.
+    let cg = world.info().cgroup_path.clone().unwrap();
+    let read = |f: &str| fs::read_to_string(cg.join(f)).unwrap();
+    for free in 1..=2u32 {
+        let before: u32 = read("pids.current").trim().parse().unwrap();
+        let victim = read("detached/cgroup.procs").lines().next().unwrap().to_owned();
+        assert!(Command::new("kill").args(["-9", &victim]).status().unwrap().success());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while read("pids.current").trim().parse::<u32>().unwrap() >= before {
+            assert!(Instant::now() < deadline, "killed service was not reaped");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let services = read("detached/cgroup.procs").lines().count();
+        let err = world
+            .exec(ExecRequest::new("fg", vec!["/bin/true".into()]))
+            .err();
+        assert!(
+            matches!(&err, Some(SandboxError::GuestError { code: ErrorCode::ExecFailed, .. })),
+            "{free} free slot(s): {err:?}"
+        );
+        assert_eq!(world.ping(6).expect("aos-guest survives").nonce, 6);
+        assert_eq!(read("detached/cgroup.procs").lines().count(), services, "services died");
+    }
     world.destroy().unwrap();
 }

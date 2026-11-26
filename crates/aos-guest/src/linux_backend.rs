@@ -130,6 +130,7 @@ impl LinuxGuestBackend {
             linux_sys::attach_child_to_cgroup(&mut cmd, dir.join("cgroup.procs"))
                 .map_err(|e| failed(&e))?;
         }
+        linux_sys::prefer_child_for_oom_kill(&mut cmd);
         let spawn_guard = linux_sys::begin_child_spawn();
         let spawned = cmd.spawn();
         drop(spawn_guard);
