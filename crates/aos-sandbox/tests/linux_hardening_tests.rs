@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aos_guest::ErrorCode;
 use aos_sandbox::{
-    DEFAULT_CGROUP_SLICE_ROOT, ExecReply, ExecRequest, GuestAgentSource, IdMapRange, NamespaceDriver, ResourceLimits,
+    DEFAULT_CGROUP_SLICE_ROOT, DEFAULT_USERNS_HOST_BASE, DEFAULT_USERNS_ID_COUNT, ExecReply, ExecRequest, GuestAgentSource, IdMapRange, NamespaceDriver, ResourceLimits,
     SandboxDriver, SandboxError, SpawnWorldSpec, WorldHandle,
 };
 use aos_types::{EpochId, WorldId};
@@ -170,6 +170,34 @@ fn root_agentd_maps_sandbox_root_to_unprivileged_host_ids() {
         fs::read_to_string(scratch.rootfs().join("private/seed")).unwrap(),
         "changed\n"
     );
+}
+
+/// Kernel quotas (keys, epoll watches, pending signals, RLIMIT_NPROC) and DAC are per host uid.
+#[test]
+fn concurrent_worlds_get_disjoint_host_id_ranges() {
+    let Some(scratch) = Scratch::new("id-ranges") else {
+        return;
+    };
+    let worlds: Vec<WorldHandle> = (0..2)
+        .map(|_| NamespaceDriver::new().spawn_world(scratch.spec()).unwrap())
+        .collect();
+    let bases: Vec<u32> = worlds
+        .iter()
+        .map(|w| {
+            let pid = w.info().host_pid.unwrap();
+            let (uids, gids) = (status_ids(pid, "Uid"), status_ids(pid, "Gid"));
+            assert!(uids.iter().chain(&gids).all(|id| *id == uids[0]), "{uids:?} {gids:?}");
+            uids[0]
+        })
+        .collect();
+    assert_ne!(bases[0], bases[1], "two live worlds share host ids");
+    for base in &bases {
+        assert!(*base >= DEFAULT_USERNS_HOST_BASE, "{base:#x}");
+        assert_eq!((base - DEFAULT_USERNS_HOST_BASE) % DEFAULT_USERNS_ID_COUNT, 0, "{base:#x}");
+    }
+    for mut w in worlds {
+        w.destroy().unwrap();
+    }
 }
 
 #[test]

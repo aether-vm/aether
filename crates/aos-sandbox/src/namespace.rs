@@ -51,7 +51,10 @@ mod linux_impl {
     use std::fs::{self, File, OpenOptions};
     use std::io::{self, Write};
     use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+    use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, PoisonError};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -61,7 +64,7 @@ mod linux_impl {
     use crate::config::{
         DEFAULT_USERNS_HOST_BASE, DEFAULT_USERNS_ID_COUNT, ExecOutputChunk, ExecReply, ExecRequest, FreezeOptions, FreezeReply, GuestAgentSource,
         IdMapRange, NetnsMode, PingReply, ResourceLimits, SeccompPolicy, SpawnWorldSpec,
-        WorldInfo,
+        USERNS_HOST_RANGES, WorldInfo,
     };
     use crate::driver::{WorldBackend, WorldHandle};
     use crate::error::SandboxError;
@@ -77,6 +80,54 @@ mod linux_impl {
     const EXEC_KILL_TIMEOUT: Duration = Duration::from_secs(1);
     const DEFAULT_FREEZE_TIMEOUT: Duration = Duration::from_secs(5);
 
+    /// Per-world host id ranges (by index) held by worlds of this process.
+    static HOST_RANGES_IN_USE: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+    /// One world's host id range, handed back on drop unless the world may still be running.
+    struct HostIdRange {
+        index: u32,
+        keep_reserved: AtomicBool,
+    }
+
+    impl HostIdRange {
+        fn claim() -> Result<Self, SandboxError> {
+            let mut in_use = HOST_RANGES_IN_USE.lock().unwrap_or_else(PoisonError::into_inner);
+            let index = (0..USERNS_HOST_RANGES)
+                .find(|i| !in_use.contains(i))
+                .ok_or_else(|| {
+                    SandboxError::spawn(
+                        "claim_host_ids",
+                        format!("all {USERNS_HOST_RANGES} host id ranges are in use"),
+                    )
+                })?;
+            in_use.insert(index);
+            Ok(Self {
+                index,
+                keep_reserved: AtomicBool::new(false),
+            })
+        }
+
+        fn first_id(&self) -> u32 {
+            DEFAULT_USERNS_HOST_BASE + self.index * DEFAULT_USERNS_ID_COUNT
+        }
+
+        /// Teardown failed: processes with these ids may survive, so never reuse them.
+        fn keep_reserved(&self) {
+            self.keep_reserved.store(true, Ordering::Relaxed);
+        }
+    }
+
+    impl Drop for HostIdRange {
+        fn drop(&mut self) {
+            if !self.keep_reserved.load(Ordering::Relaxed) {
+                HOST_RANGES_IN_USE
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&self.index);
+            }
+        }
+    }
+
     struct NamespaceWorldBackend {
         info: WorldInfo,
         client: GuestRpcClient<File, File>,
@@ -88,6 +139,7 @@ mod linux_impl {
         frozen_disk_clean: bool,
         poisoned: bool,
         destroyed: bool,
+        host_ids: Option<HostIdRange>,
     }
 
     impl NamespaceWorldBackend {
@@ -301,7 +353,12 @@ mod linux_impl {
                 return Ok(());
             }
             self.destroyed = true;
-            teardown_world_resources(self.child_pid, self.world_cgroup.as_deref())
+            let res = teardown_world_resources(self.child_pid, self.world_cgroup.as_deref());
+            if let (Err(_), Some(ids)) = (&res, &self.host_ids) {
+                ids.keep_reserved();
+            }
+            self.host_ids = None;
+            res
         }
     }
 
@@ -309,7 +366,12 @@ mod linux_impl {
         spec.validate()?;
 
         let remap_root = remaps_root_ids(&spec);
-        let (uid_map, gid_map) = effective_id_maps(&spec)?;
+        let host_ids = if remap_root && (spec.uid_map.is_empty() || spec.gid_map.is_empty()) {
+            Some(HostIdRange::claim()?)
+        } else {
+            None
+        };
+        let (uid_map, gid_map) = effective_id_maps(&spec, host_ids.as_ref())?;
 
         // Refuse symlinked rootfs_dir itself (P0-2).
         let root_meta = fs::symlink_metadata(&spec.rootfs_dir).map_err(|e| {
@@ -406,7 +468,11 @@ mod linux_impl {
         drop(exec_cgroup_fds);
 
         let cleanup_on_error = |cg: Option<&PathBuf>| {
-            let _ = teardown_world_resources(child_pid, cg.map(|p| p.as_path()));
+            if teardown_world_resources(child_pid, cg.map(|p| p.as_path())).is_err()
+                && let Some(ids) = &host_ids
+            {
+                ids.keep_reserved();
+            }
         };
 
         // 5. Configure UID/GID maps if userns is enabled, then idmap the still-detached mounts
@@ -518,6 +584,7 @@ mod linux_impl {
             frozen_disk_clean: false,
             poisoned: false,
             destroyed: false,
+            host_ids,
         };
 
         Ok(WorldHandle::from_backend(Box::new(backend)))
@@ -625,16 +692,18 @@ mod linux_impl {
         spec.enable_userns && linux_sys::current_euid_egid().0 == 0
     }
 
+    /// `host_ids` is set whenever a root `agentd` has to fill in a map itself.
     fn effective_id_maps(
         spec: &SpawnWorldSpec,
+        host_ids: Option<&HostIdRange>,
     ) -> Result<(Vec<IdMapRange>, Vec<IdMapRange>), SandboxError> {
         let (euid, egid) = linux_sys::current_euid_egid();
         let remap_root = remaps_root_ids(spec);
         let pick = |explicit: &[IdMapRange], own_id: u32| {
             if !explicit.is_empty() {
                 explicit.to_vec()
-            } else if remap_root {
-                vec![IdMapRange::new(0, DEFAULT_USERNS_HOST_BASE, DEFAULT_USERNS_ID_COUNT)]
+            } else if let Some(ids) = host_ids {
+                vec![IdMapRange::new(0, ids.first_id(), DEFAULT_USERNS_ID_COUNT)]
             } else {
                 vec![IdMapRange::new(0, own_id, 1)]
             }

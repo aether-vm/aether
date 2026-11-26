@@ -18,13 +18,19 @@ pub const DEFAULT_CGROUP_SLICE_ROOT: &str = "/sys/fs/cgroup/forkloom.slice";
 /// Default handshake timeout waiting for the spawned `aos-guest` `Pong`.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Default first host UID/GID backing sandbox ids when `agentd` runs as root.
+/// First host UID/GID of the ranges backing sandbox ids when `agentd` runs as root.
 ///
 /// `0x7000_0000` lies above the systemd container range and the usual `/etc/subuid` allocations.
+/// Each live world gets its own [`DEFAULT_USERNS_ID_COUNT`]-sized range from here, since kernel
+/// quotas (keys, epoll watches, pending signals, `RLIMIT_NPROC`) and DAC are per host uid. The
+/// ranges are tracked per process, so one root `agentd` per host owns them.
 pub const DEFAULT_USERNS_HOST_BASE: u32 = 0x7000_0000;
 
-/// Number of sandbox UIDs/GIDs mapped from [`DEFAULT_USERNS_HOST_BASE`].
+/// Number of sandbox UIDs/GIDs in each per-world host range.
 pub const DEFAULT_USERNS_ID_COUNT: u32 = 65_536;
+
+/// Number of per-world host ranges, covering `0x7000_0000..0x8000_0000`.
+pub const USERNS_HOST_RANGES: u32 = 4096;
 
 /// Single UID/GID mapping entry for Linux user namespaces (`<inside> <outside> <count>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,8 +134,9 @@ pub struct SpawnWorldSpec {
     /// Enable `CLONE_NEWUSER` user namespace isolation.
     pub enable_userns: bool,
     /// Explicit UID mappings when `enable_userns == true`. Empty defaults to
-    /// `0 DEFAULT_USERNS_HOST_BASE DEFAULT_USERNS_ID_COUNT` for a root `agentd` and to
-    /// `0 <euid> 1` otherwise. A root `agentd` rejects any range covering host id 0.
+    /// `0 <first id of a free per-world range> DEFAULT_USERNS_ID_COUNT` for a root `agentd`
+    /// (see [`DEFAULT_USERNS_HOST_BASE`]) and to `0 <euid> 1` otherwise. A root `agentd` rejects
+    /// any range covering host id 0.
     pub uid_map: Vec<IdMapRange>,
     /// Explicit GID mappings when `enable_userns == true` (same rules as `uid_map`).
     pub gid_map: Vec<IdMapRange>,
