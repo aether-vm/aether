@@ -150,6 +150,51 @@ fn seccomp_filter_blocks_nested_namespaces_mounts_iouring_bpf_ptrace_kexec() {
     }
 }
 
+/// Workloads share aos-guest's uid, so the kernel's same-owner checks alone let them reach PID 1.
+#[test]
+fn seccomp_filter_keeps_workloads_off_pid_1_and_the_keyrings() {
+    let filter = build_x86_64_baseline_filter();
+    let eval = |sys_nr: u32, a0: u64, a1: u64| {
+        eval_filter(&filter, &SeccompData::x86_64(sys_nr, [a0, a1, 0, 0, 0, 0])).unwrap()
+    };
+    let eperm = ret_errno(EPERM);
+
+    // Resource limits only for the caller itself: any thread id of aos-guest shares its limits.
+    // The kernel reads pid as a 32-bit int.
+    assert_eq!(eval(nr::PRLIMIT64, 0, 7), SECCOMP_RET_ALLOW);
+    assert_eq!(eval(nr::PRLIMIT64, 1 << 32, 7), SECCOMP_RET_ALLOW);
+    for pid in [1, 2, 1234, (1 << 32) | 1] {
+        assert_eq!(eval(nr::PRLIMIT64, pid, 7), eperm, "prlimit64 pid {pid:#x}");
+    }
+
+    // Priorities: one process at a time and never PID 1 (`who == 0` is the caller).
+    for (which, who) in [(0, 0), (0, 1234)] {
+        assert_eq!(eval(nr::SETPRIORITY, which, who), SECCOMP_RET_ALLOW);
+        assert_eq!(eval(nr::IOPRIO_SET, which + 1, who), SECCOMP_RET_ALLOW);
+    }
+    // PRIO_PROCESS/IOPRIO_WHO_PROCESS on PID 1, then process groups and users (which cover PID 1).
+    for (which, who) in [(0, 1), (1, 0), (2, 0), (1, 1234)] {
+        assert_eq!(eval(nr::SETPRIORITY, which, who), eperm, "setpriority({which}, {who})");
+        assert_eq!(eval(nr::IOPRIO_SET, which + 1, who), eperm, "ioprio_set({}, {who})", which + 1);
+    }
+
+    for sys_nr in [
+        nr::SCHED_SETPARAM,
+        nr::SCHED_SETSCHEDULER,
+        nr::SCHED_SETAFFINITY,
+        nr::SCHED_SETATTR,
+    ] {
+        assert_eq!(eval(sys_nr, 0, 0), SECCOMP_RET_ALLOW, "nr {sys_nr} on self");
+        assert_eq!(eval(sys_nr, 1234, 0), SECCOMP_RET_ALLOW, "nr {sys_nr} on a workload");
+        assert_eq!(eval(sys_nr, 1, 0), eperm, "nr {sys_nr} on PID 1");
+    }
+
+    // Keyring quotas are per host uid.
+    for sys_nr in [nr::ADD_KEY, nr::REQUEST_KEY, nr::KEYCTL] {
+        assert_eq!(eval(sys_nr, 0, 0), eperm, "nr {sys_nr}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 2. Spec Validation & Cgroup Path Formatting
 // ---------------------------------------------------------------------------

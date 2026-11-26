@@ -60,6 +60,7 @@ fn build_static_seccomp_probe(dst_path: &Path) -> bool {
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -121,6 +122,35 @@ int main(int argc, char **argv) {
            rc_mount, err_mount,
            rc_uring, err_uring,
            rc_thread, thread_val);
+
+    /* Calls on PID 1 only re-apply its current values, so they are harmless if they get through. */
+    struct rlimit rl;
+    errno = 0;
+    long rc_prl1 = syscall(SYS_prlimit64, 1, RLIMIT_NOFILE, NULL, &rl);
+    int err_prl1 = errno;
+    errno = 0;
+    long rc_prl0 = syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, NULL, &rl);
+    int err_prl0 = errno;
+    errno = 0;
+    int rc_prio1 = setpriority(PRIO_PROCESS, 1, 0);
+    int err_prio1 = errno;
+    errno = 0;
+    int rc_prio0 = setpriority(PRIO_PROCESS, 0, 1);
+    int err_prio0 = errno;
+    cpu_set_t cpus;
+    sched_getaffinity(0, sizeof cpus, &cpus);
+    errno = 0;
+    int rc_aff1 = sched_setaffinity(1, sizeof cpus, &cpus);
+    int err_aff1 = errno;
+    errno = 0;
+    long rc_io1 = syscall(SYS_ioprio_set, 1, 1, 0);
+    int err_io1 = errno;
+    errno = 0;
+    long rc_key = syscall(SYS_keyctl, 0, -4, 0);
+    int err_key = errno;
+    printf("prlimit1=%ld:%d prlimit0=%ld:%d prio1=%d:%d prio0=%d:%d aff1=%d:%d ioprio1=%ld:%d keyctl=%ld:%d\n",
+           rc_prl1, err_prl1, rc_prl0, err_prl0, rc_prio1, err_prio1, rc_prio0, err_prio0,
+           rc_aff1, err_aff1, rc_io1, err_io1, rc_key, err_key);
     return 0;
 }
 "#;
@@ -306,6 +336,19 @@ fn live_linux_namespace_driver_hardening_and_cgroup_kill() {
         probe_out.contains("thread=0:12345"),
         "normal pthread_create must succeed via clone3(ENOSYS)->clone, got: {probe_out}"
     );
+    // The workload shares PID 1's uid: limits, priorities and affinity of PID 1 stay out of reach,
+    // its own stay usable; keyrings are off.
+    for expect in [
+        "prlimit1=-1:1 ",
+        "prlimit0=0:0 ",
+        "prio1=-1:1 ",
+        "prio0=0:0 ",
+        "aff1=-1:1 ",
+        "ioprio1=-1:1 ",
+        "keyctl=-1:1\n",
+    ] {
+        assert!(probe_out.contains(expect), "expected {expect:?} in: {probe_out}");
+    }
 
     // 4. Verify /dev/shm bounded tmpfs mount exists inside pivoted rootfs (§7.4).
     let shm_reply = world

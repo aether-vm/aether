@@ -11,7 +11,12 @@
 //!   - `unshare`, `setns` -> `EPERM`
 //! - Blocks mount family (`mount`, `umount2`, `pivot_root`, `open_tree`, `move_mount`,
 //!   `fsopen`, `fsconfig`, `fsmount`, `fspick`, `mount_setattr`) -> `EPERM`
-//! - Blocks `io_uring_*`, `bpf`, `ptrace`, `kexec_load`, `kexec_file_load` -> `EPERM`
+//! - Blocks `io_uring_*`, `bpf`, `ptrace`, `kexec_load`, `kexec_file_load` and the keyring calls
+//!   (`add_key`, `request_key`, `keyctl`) -> `EPERM`
+//! - Keeps workloads, which share `aos-guest`'s uid, off PID 1 -> `EPERM`:
+//!   - `prlimit64` on any pid but `0` (every thread id of `aos-guest` shares its limits)
+//!   - `setpriority` / `ioprio_set` on process groups, users, or PID 1
+//!   - `sched_setparam`, `sched_setscheduler`, `sched_setaffinity`, `sched_setattr` on PID 1
 //!
 //! Compiled with `#![forbid(unsafe_code)]` and includes a pure-Rust cBPF VM evaluator
 //! so every jump offset, bitmask, and return code is unit-tested cross-platform.
@@ -61,12 +66,22 @@ pub mod nr {
     pub const IOCTL: u32 = 16;
     pub const CLONE: u32 = 56;
     pub const PTRACE: u32 = 101;
+    pub const SETPRIORITY: u32 = 141;
+    pub const SCHED_SETPARAM: u32 = 142;
+    pub const SCHED_SETSCHEDULER: u32 = 144;
     pub const PIVOT_ROOT: u32 = 155;
     pub const MOUNT: u32 = 165;
     pub const UMOUNT2: u32 = 166;
+    pub const SCHED_SETAFFINITY: u32 = 203;
     pub const KEXEC_LOAD: u32 = 246;
+    pub const ADD_KEY: u32 = 248;
+    pub const REQUEST_KEY: u32 = 249;
+    pub const KEYCTL: u32 = 250;
+    pub const IOPRIO_SET: u32 = 251;
     pub const UNSHARE: u32 = 272;
+    pub const PRLIMIT64: u32 = 302;
     pub const SETNS: u32 = 308;
+    pub const SCHED_SETATTR: u32 = 314;
     pub const KEXEC_FILE_LOAD: u32 = 320;
     pub const BPF: u32 = 321;
     pub const IO_URING_SETUP: u32 = 425;
@@ -103,7 +118,17 @@ pub const BLOCKED_EPERM_SYSCALLS: &[u32] = &[
     nr::PTRACE,
     nr::KEXEC_LOAD,
     nr::KEXEC_FILE_LOAD,
+    nr::ADD_KEY,
+    nr::REQUEST_KEY,
+    nr::KEYCTL,
 ];
+
+/// `setpriority(2)` `which` value for a single process.
+const PRIO_PROCESS: u32 = 0;
+/// `ioprio_set(2)` `which` value for a single process.
+const IOPRIO_WHO_PROCESS: u32 = 1;
+/// The only pid `aos-guest` can have inside the world's pid namespace.
+const GUEST_PID: u32 = 1;
 
 // cBPF instruction opcodes (`include/uapi/linux/bpf_common.h`, `filter.h`).
 const BPF_LD: u16 = 0x00;
@@ -199,162 +224,148 @@ pub const fn ret_errno(errno: u32) -> u32 {
     SECCOMP_RET_ERRNO | (errno & SECCOMP_RET_DATA)
 }
 
-/// Compile the strict §7.4 + §5.1 `x86_64` seccomp-BPF program.
-///
-/// Uses a clean two-pass layout with explicit terminal return instructions at the end
-/// so jump offsets are small, audited, and guaranteed within `u8` range.
-pub fn build_x86_64_baseline_filter() -> Vec<SockFilter> {
-    let mut prog = Vec::with_capacity(64);
+/// Jump targets inside the program, resolved by [`Asm::finish`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Label {
+    Allow,
+    Eperm,
+    Enosys,
+    Eopnotsupp,
+    Kill,
+    IoctlCheck,
+    CloneCheck,
+    OwnPidOnly,
+    NotGuestPid,
+    PrioCheck,
+    IoprioCheck,
+}
 
-    // Reserve indices for our 5 terminal return instructions at the end; we will
-    // assemble the body first and patch jumps cleanly via helper offsets.
-    //
-    // Layout:
-    //   [0]  LD arch
-    //   [1]  JEQ AUDIT_ARCH_X86_64 -> next (jt=0), else -> KILL_PROCESS
-    //   [2]  LD nr
-    //   [3]  JGE X32_SYSCALL_BIT -> KILL_PROCESS, else -> next
-    //   [4]  JEQ SYS_ioctl -> ioctl_check, else -> next
-    //   [5]  JEQ SYS_clone -> clone_check, else -> next
-    //   [6]  JEQ SYS_clone3 -> RET_ENOSYS, else -> next
-    //   [7..7+N] JEQ blocked_nr -> RET_EPERM, else -> next
-    //   [...] RET_ALLOW
-    //   [ioctl_check]:
-    //        LD args[1]_lo
-    //        RSH 8
-    //        AND 0xFF
-    //        JEQ 0x94 -> RET_EOPNOTSUPP, else -> RET_ALLOW
-    //   [clone_check]:
-    //        LD args[0]_lo
-    //        JSET CLONE_NEW_ALL_MASK -> RET_EPERM, else -> RET_ALLOW
-    //   [terminals]:
-    //        RET_ALLOW
-    //        RET_EPERM
-    //        RET_ENOSYS
-    //        RET_EOPNOTSUPP
-    //        RET_KILL_PROCESS
+/// Minimal forward-only cBPF assembler: every jump names a label or falls through.
+#[derive(Default)]
+struct Asm {
+    prog: Vec<SockFilter>,
+    labels: Vec<(Label, usize)>,
+    jumps: Vec<(usize, Option<Label>, Option<Label>)>,
+}
 
-    let n_blocked = BLOCKED_EPERM_SYSCALLS.len();
-
-    // Compute exact instruction indices ahead of time.
-    let idx_arch_check = 1usize;
-    let idx_x32_check = 3usize;
-    let idx_ioctl_branch = 4usize;
-    let idx_clone_branch = 5usize;
-    let idx_clone3_branch = 6usize;
-    let idx_blocked_start = 7usize;
-    let idx_fallthrough_allow = idx_blocked_start + n_blocked;
-
-    let idx_ioctl_check = idx_fallthrough_allow + 1; // 4 insns: LD, RSH, AND, JEQ
-    let idx_clone_check = idx_ioctl_check + 4; // 2 insns: LD, JSET
-
-    let idx_ret_allow = idx_clone_check + 2;
-    let idx_ret_eperm = idx_ret_allow + 1;
-    let idx_ret_enosys = idx_ret_eperm + 1;
-    let idx_ret_eopnotsupp = idx_ret_enosys + 1;
-    let idx_ret_kill = idx_ret_eopnotsupp + 1;
-
-    let rel = |from: usize, to: usize| -> u8 {
-        let delta = to
-            .checked_sub(from + 1)
-            .expect("seccomp BPF jumps must always move forward");
-        u8::try_from(delta).expect("seccomp BPF jump offset fits in u8")
-    };
-
-    // [0..1] Arch check
-    prog.push(SockFilter::stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARCH));
-    prog.push(SockFilter::jump(
-        BPF_JMP | BPF_JEQ | BPF_K,
-        AUDIT_ARCH_X86_64,
-        0,
-        rel(idx_arch_check, idx_ret_kill),
-    ));
-
-    // [2..3] Load nr & reject x32 ABI bit
-    prog.push(SockFilter::stmt(BPF_LD | BPF_W | BPF_ABS, OFF_NR));
-    prog.push(SockFilter::jump(
-        BPF_JMP | BPF_JGE | BPF_K,
-        X32_SYSCALL_BIT,
-        rel(idx_x32_check, idx_ret_kill),
-        0,
-    ));
-
-    // [4] ioctl -> ioctl_check
-    prog.push(SockFilter::jump(
-        BPF_JMP | BPF_JEQ | BPF_K,
-        nr::IOCTL,
-        rel(idx_ioctl_branch, idx_ioctl_check),
-        0,
-    ));
-
-    // [5] clone -> clone_check
-    prog.push(SockFilter::jump(
-        BPF_JMP | BPF_JEQ | BPF_K,
-        nr::CLONE,
-        rel(idx_clone_branch, idx_clone_check),
-        0,
-    ));
-
-    // [6] clone3 -> ENOSYS (triggers clean fallback to clone(2) for glibc/musl threads!)
-    prog.push(SockFilter::jump(
-        BPF_JMP | BPF_JEQ | BPF_K,
-        nr::CLONE3,
-        rel(idx_clone3_branch, idx_ret_enosys),
-        0,
-    ));
-
-    // [7..7+N] Unconditionally blocked syscalls -> EPERM
-    for (i, &sys_nr) in BLOCKED_EPERM_SYSCALLS.iter().enumerate() {
-        let here = idx_blocked_start + i;
-        prog.push(SockFilter::jump(
-            BPF_JMP | BPF_JEQ | BPF_K,
-            sys_nr,
-            rel(here, idx_ret_eperm),
-            0,
-        ));
+impl Asm {
+    fn stmt(&mut self, code: u16, k: u32) {
+        self.prog.push(SockFilter::stmt(code, k));
     }
 
-    // Fallthrough allow
-    debug_assert_eq!(prog.len(), idx_fallthrough_allow);
-    prog.push(SockFilter::stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+    /// Conditional jump against `k`; `None` falls through to the next instruction.
+    fn jump(&mut self, code: u16, k: u32, jt: Option<Label>, jf: Option<Label>) {
+        self.jumps.push((self.prog.len(), jt, jf));
+        self.prog.push(SockFilter::jump(code, k, 0, 0));
+    }
 
-    // [ioctl_check]: ((args[1] as u32 >> 8) & 0xFF) == 0x94 -> EOPNOTSUPP else ALLOW
-    debug_assert_eq!(prog.len(), idx_ioctl_check);
-    prog.push(SockFilter::stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARG1_LO));
-    prog.push(SockFilter::stmt(BPF_ALU | BPF_RSH | BPF_K, 8));
-    prog.push(SockFilter::stmt(BPF_ALU | BPF_AND | BPF_K, 0xFF));
-    let idx_ioctl_cmp = prog.len();
-    prog.push(SockFilter::jump(
-        BPF_JMP | BPF_JEQ | BPF_K,
-        BTRFS_IOCTL_MAGIC,
-        rel(idx_ioctl_cmp, idx_ret_eopnotsupp),
-        rel(idx_ioctl_cmp, idx_ret_allow),
-    ));
+    fn label(&mut self, label: Label) {
+        self.labels.push((label, self.prog.len()));
+    }
 
-    // [clone_check]: (args[0] as u32 & CLONE_NEW_ALL_MASK) != 0 -> EPERM else ALLOW
-    debug_assert_eq!(prog.len(), idx_clone_check);
-    prog.push(SockFilter::stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARG0_LO));
-    let idx_clone_cmp = prog.len();
-    prog.push(SockFilter::jump(
-        BPF_JMP | BPF_JSET | BPF_K,
-        CLONE_NEW_ALL_MASK,
-        rel(idx_clone_cmp, idx_ret_eperm),
-        rel(idx_clone_cmp, idx_ret_allow),
-    ));
+    fn finish(mut self) -> Vec<SockFilter> {
+        for &(from, jt, jf) in &self.jumps {
+            let rel = |target: Option<Label>| -> u8 {
+                let Some(label) = target else { return 0 };
+                let to = self
+                    .labels
+                    .iter()
+                    .find(|(l, _)| *l == label)
+                    .map(|(_, i)| *i)
+                    .expect("seccomp BPF label must be placed");
+                let delta = to
+                    .checked_sub(from + 1)
+                    .expect("seccomp BPF jumps must always move forward");
+                u8::try_from(delta).expect("seccomp BPF jump offset fits in u8")
+            };
+            let (t, f) = (rel(jt), rel(jf));
+            self.prog[from].jt = t;
+            self.prog[from].jf = f;
+        }
+        self.prog
+    }
+}
 
-    // Terminals
-    debug_assert_eq!(prog.len(), idx_ret_allow);
-    prog.push(SockFilter::stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
-    debug_assert_eq!(prog.len(), idx_ret_eperm);
-    prog.push(SockFilter::stmt(BPF_RET | BPF_K, ret_errno(EPERM)));
-    debug_assert_eq!(prog.len(), idx_ret_enosys);
-    prog.push(SockFilter::stmt(BPF_RET | BPF_K, ret_errno(ENOSYS)));
-    debug_assert_eq!(prog.len(), idx_ret_eopnotsupp);
-    prog.push(SockFilter::stmt(BPF_RET | BPF_K, ret_errno(EOPNOTSUPP)));
-    debug_assert_eq!(prog.len(), idx_ret_kill);
-    prog.push(SockFilter::stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS));
+/// Compile the strict §7.4 + §5.1 `x86_64` seccomp-BPF program.
+///
+/// Layout: arch and x32 checks, one `JEQ` per syscall that needs a decision (jumping to an
+/// argument check or straight to a return), fallthrough `ALLOW`, the argument checks, then the
+/// shared terminal returns. All jumps move forward and fit in `u8`.
+pub fn build_x86_64_baseline_filter() -> Vec<SockFilter> {
+    use Label::*;
+    const JEQ: u16 = BPF_JMP | BPF_JEQ | BPF_K;
+    const LD: u16 = BPF_LD | BPF_W | BPF_ABS;
+    let mut a = Asm::default();
 
-    prog
+    // Wrong architecture or x32 ABI -> KILL_PROCESS.
+    a.stmt(LD, OFF_ARCH);
+    a.jump(JEQ, AUDIT_ARCH_X86_64, None, Some(Kill));
+    a.stmt(LD, OFF_NR);
+    a.jump(BPF_JMP | BPF_JGE | BPF_K, X32_SYSCALL_BIT, Some(Kill), None);
+
+    // Dispatch on the syscall number (still in the accumulator).
+    let dispatch = [
+        (nr::IOCTL, IoctlCheck),
+        (nr::CLONE, CloneCheck),
+        // ENOSYS makes glibc/musl `pthread_create` fall back to clone(2).
+        (nr::CLONE3, Enosys),
+        (nr::PRLIMIT64, OwnPidOnly),
+        (nr::SETPRIORITY, PrioCheck),
+        (nr::IOPRIO_SET, IoprioCheck),
+        (nr::SCHED_SETPARAM, NotGuestPid),
+        (nr::SCHED_SETSCHEDULER, NotGuestPid),
+        (nr::SCHED_SETAFFINITY, NotGuestPid),
+        (nr::SCHED_SETATTR, NotGuestPid),
+    ];
+    for (sys_nr, target) in dispatch {
+        a.jump(JEQ, sys_nr, Some(target), None);
+    }
+    for &sys_nr in BLOCKED_EPERM_SYSCALLS {
+        a.jump(JEQ, sys_nr, Some(Eperm), None);
+    }
+    a.stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+
+    // ((args[1] as u32 >> 8) & 0xFF) == BTRFS_IOCTL_MAGIC -> EOPNOTSUPP.
+    a.label(IoctlCheck);
+    a.stmt(LD, OFF_ARG1_LO);
+    a.stmt(BPF_ALU | BPF_RSH | BPF_K, 8);
+    a.stmt(BPF_ALU | BPF_AND | BPF_K, 0xFF);
+    a.jump(JEQ, BTRFS_IOCTL_MAGIC, Some(Eopnotsupp), Some(Allow));
+
+    // Any CLONE_NEW* flag -> EPERM.
+    a.label(CloneCheck);
+    a.stmt(LD, OFF_ARG0_LO);
+    a.jump(BPF_JMP | BPF_JSET | BPF_K, CLONE_NEW_ALL_MASK, Some(Eperm), Some(Allow));
+
+    // Pid arguments are C ints, so the low word is what the kernel uses.
+    a.label(OwnPidOnly);
+    a.stmt(LD, OFF_ARG0_LO);
+    a.jump(JEQ, 0, Some(Allow), Some(Eperm));
+
+    // setpriority(which, who) / ioprio_set(which, who): one process, and not PID 1.
+    for (label, single_process) in [(PrioCheck, PRIO_PROCESS), (IoprioCheck, IOPRIO_WHO_PROCESS)] {
+        a.label(label);
+        a.stmt(LD, OFF_ARG0_LO);
+        a.jump(JEQ, single_process, None, Some(Eperm));
+        a.stmt(LD, OFF_ARG1_LO);
+        a.jump(JEQ, GUEST_PID, Some(Eperm), Some(Allow));
+    }
+
+    a.label(NotGuestPid);
+    a.stmt(LD, OFF_ARG0_LO);
+    a.jump(JEQ, GUEST_PID, Some(Eperm), Some(Allow));
+
+    for (label, ret) in [
+        (Allow, SECCOMP_RET_ALLOW),
+        (Eperm, ret_errno(EPERM)),
+        (Enosys, ret_errno(ENOSYS)),
+        (Eopnotsupp, ret_errno(EOPNOTSUPP)),
+        (Kill, SECCOMP_RET_KILL_PROCESS),
+    ] {
+        a.label(label);
+        a.stmt(BPF_RET | BPF_K, ret);
+    }
+    a.finish()
 }
 
 /// Evaluate a classic BPF seccomp program against `data` in pure Rust.
