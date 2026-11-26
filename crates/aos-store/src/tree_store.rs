@@ -755,6 +755,14 @@ impl TreeStore {
         Ok(())
     }
 
+    /// Run `op`; if it ran out of space, release the emergency ballast and run it once more.
+    fn retry_once_without_ballast(&self, mut op: impl FnMut() -> Result<()>) -> Result<()> {
+        match op() {
+            Err(StoreError::NoSpace { .. }) if self.release_ballast()? => op(),
+            r => r,
+        }
+    }
+
     fn sync_after_readonly_snapshot(&self, dst: &Path) -> Result<()> {
         #[cfg(target_os = "linux")]
         if self.btrfs_backed {
@@ -891,21 +899,48 @@ impl RecoveryHooks for TreeStoreRecoveryHooks {
         aos_meta::hooks::remove_path(&self.volatile_root.join(object.name()))
     }
 
-    /// A sealed subvolume cannot be renamed into another directory while it is read-only.
+    /// A sealed subvolume cannot be renamed into another directory while it is read-only, and
+    /// making it writable for the move would leave it writable after a crash. It is snapshotted
+    /// read-only into quarantine instead and then destroyed; a crash in between leaves both
+    /// copies, and the next R6 quarantines the original again. Anything else is renamed. Running
+    /// out of space releases the ballast and retries once.
     fn quarantine_object(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+        let store = &self.store;
+        let to_io = |e: StoreError| io::Error::other(e.to_string());
         #[cfg(target_os = "linux")]
         {
             use crate::btrfs::linux_impl as btrfs;
-            if self.store.btrfs_backed && btrfs::is_btrfs_subvolume(from)? {
-                let subvol = btrfs::open_dir_nofollow(from)?;
-                let flags = btrfs::btrfs_subvol_getflags(&subvol)?;
-                btrfs::btrfs_subvol_set_readonly(&subvol, false)?;
-                let moved = fs::rename(from, to);
-                btrfs::btrfs_subvol_setflags(&subvol, flags)?;
-                return moved;
+            if store.btrfs_backed && btrfs::is_btrfs_subvolume(from)? {
+                let flags = btrfs::btrfs_subvol_getflags(&btrfs::open_dir_nofollow(from)?)?;
+                if flags & crate::btrfs::BTRFS_SUBVOL_RDONLY != 0 {
+                    let (Some(dir), Some(name)) = (to.parent(), to.file_name().and_then(|n| n.to_str()))
+                    else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("unusable quarantine target {}", to.display()),
+                        ));
+                    };
+                    store
+                        .retry_once_without_ballast(|| store.create_snapshot(from, dir, name, true))
+                        .and_then(|()| {
+                            store.retry_once_without_ballast(|| store.sync_after_readonly_snapshot(to))
+                        })
+                        .and_then(|()| store.destroy_subvolume(from))
+                        .map_err(to_io)?;
+                    return Ok(());
+                }
             }
         }
-        fs::rename(from, to)
+        store
+            .retry_once_without_ballast(|| {
+                fs::rename(from, to).map_err(|e| {
+                    StoreError::io_or_enospc(
+                        format!("renaming {} to {}", from.display(), to.display()),
+                        e,
+                    )
+                })
+            })
+            .map_err(to_io)
     }
 
     fn purge_quarantined(&mut self, path: &Path) -> io::Result<()> {

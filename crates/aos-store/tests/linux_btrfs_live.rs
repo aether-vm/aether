@@ -512,3 +512,69 @@ fn btrfs_enospc_ballast_release_unblocks_subvolume_reclamation() {
     assert!(rearmed.present);
     assert_eq!(rearmed.actual_bytes, 64 * MIB);
 }
+
+#[test]
+#[ignore = "requires root + live Linux Btrfs loop mount in Forkloom-Dev"]
+fn r6_quarantines_a_sealed_subvolume_on_a_full_pool_and_keeps_it_sealed() {
+    use aos_meta::RecoveryHooks;
+    let pool = TempBtrfsPool::create("q-enospc", 512, "noatime");
+    let store =
+        TreeStore::open(TreeStoreConfig::new(pool.mnt()).with_ballast_bytes(64 * MIB)).unwrap();
+    let mut payload = vec![0u8; 4 * MIB as usize];
+    let mut state: u64 = 0x0123_4567_89ab_cdef;
+    for chunk in payload.as_chunks_mut::<8>().0 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        *chunk = state.to_ne_bytes();
+    }
+    let tar_bytes = build_tar(|b| {
+        for i in 0..4 {
+            append_regular(b, &format!("blob-{i}.bin"), &payload, 0o644);
+        }
+    });
+    // A sealed frame subvolume that redb no longer knows about.
+    let orphan = store
+        .import_tar(FrameId::random(), Cursor::new(tar_bytes), &TarImportOptions::default())
+        .unwrap()
+        .into_inner();
+    let ro = |p: &Path| {
+        btrfs_sys::btrfs_subvol_getflags(&btrfs_sys::open_dir_nofollow(p).unwrap()).unwrap()
+            & BTRFS_SUBVOL_RDONLY
+            != 0
+    };
+    assert!(ro(orphan.path()));
+
+    let fill_dir = store.worlds_dir().join("filler");
+    fs::create_dir_all(&fill_dir).unwrap();
+    let mut hit_enospc = false;
+    for i in 0..2000u32 {
+        let p = fill_dir.join(format!("f-{i:04}"));
+        let written = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&p)
+            .and_then(|mut f| f.write_all(&payload));
+        match written {
+            Ok(()) => {}
+            Err(e) if aos_store::is_enospc(&e) => {
+                hit_enospc = true;
+                break;
+            }
+            Err(e) => panic!("filling the pool: {e}"),
+        }
+    }
+    assert!(hit_enospc, "must actually reach ENOSPC on the 512 MiB Btrfs pool");
+    let root_fd = btrfs_sys::open_dir_nofollow(pool.mnt()).unwrap();
+    let _ = btrfs_sys::btrfs_sync(&root_fd);
+
+    let qdir = pool.mnt().join("quarantine/epoch-9");
+    fs::create_dir_all(&qdir).unwrap();
+    let to = qdir.join(orphan.name());
+    let mut hooks = TreeStoreRecoveryHooks::new(store.clone(), pool.mnt().join("volatile"));
+    hooks
+        .quarantine_object(orphan.path(), &to)
+        .expect("R6 must get past a full pool by releasing the ballast");
+    assert!(!orphan.path().exists(), "moved out of objects/");
+    assert!(ro(&to), "still sealed in quarantine");
+    assert_eq!(fs::read(to.join("blob-3.bin")).unwrap(), payload, "content unchanged");
+    let _ = fs::remove_dir_all(&fill_dir);
+}
