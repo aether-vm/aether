@@ -245,6 +245,25 @@ fn bind_mounted_host_agent_works_from_root_only_dir_and_stays_readonly() {
 }
 
 #[test]
+fn bind_mounted_host_agent_may_be_given_through_a_symlink() {
+    let Some(scratch) = Scratch::new("agent-link") else {
+        return;
+    };
+    let host_bin = scratch.base.join("aos-guest");
+    fs::copy(scratch.rootfs().join("sbin/init"), &host_bin).unwrap();
+    let link = scratch.base.join("aos-guest-current");
+    std::os::unix::fs::symlink(&host_bin, &link).unwrap();
+    let mut spec = scratch.spec();
+    spec.guest_agent = GuestAgentSource::BindMountHostBinary {
+        host_path: link,
+        guest_mount_path: PathBuf::from("/sbin/init"),
+    };
+    let mut world = NamespaceDriver::new().spawn_world(spec).expect("symlinked agent path");
+    assert_eq!(world.ping(4).unwrap().nonce, 4);
+    world.destroy().unwrap();
+}
+
+#[test]
 fn explicit_map_to_host_root_is_rejected_for_root_agentd() {
     let Some(scratch) = Scratch::new("map0") else {
         return;

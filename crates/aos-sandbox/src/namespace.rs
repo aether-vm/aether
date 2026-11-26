@@ -719,12 +719,16 @@ mod linux_impl {
                 host_path,
                 guest_mount_path,
             } => {
-                if !host_path.is_file() {
-                    return Err(SandboxError::InvalidConfig(format!(
-                        "BindMountHostBinary host_path is not an existing file: {:?}",
-                        host_path
-                    )));
-                }
+                // The mount is taken without following symlinks, so resolve the (host-admin
+                // supplied) path first.
+                let host_path = &fs::canonicalize(host_path)
+                    .ok()
+                    .filter(|p| p.is_file())
+                    .ok_or_else(|| {
+                        SandboxError::InvalidConfig(format!(
+                            "BindMountHostBinary host_path is not an existing file: {host_path:?}"
+                        ))
+                    })?;
                 let rel = guest_mount_path
                     .strip_prefix("/")
                     .unwrap_or(guest_mount_path.as_path());
