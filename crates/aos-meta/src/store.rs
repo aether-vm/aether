@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use aos_types::{BootId, EpochId, Ephemeral, FrameId, Persisted, ProofKind, WorldId};
 use redb::{Database, ReadableTable};
@@ -36,6 +37,10 @@ pub struct MetaEngine {
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) world_leases: HashMap<WorldId, WorldLease>,
     pub(crate) pin_leases: HashMap<(FrameId, String), PinLease>,
+    /// When this engine was opened (monotonic).
+    pub(crate) opened_at: Instant,
+    /// Monotonic purge deadline of every quarantine record this run created, by record key.
+    pub(crate) quarantine_due: HashMap<String, Instant>,
     // Declared last: the pool lock is released only after the database is closed.
     pub(crate) _lock: PoolLock,
 }
@@ -1157,10 +1162,22 @@ impl MetaEngine {
 
         // 4. quarantine purge (physical delete first, record second: a crash in between only
         //    leaves a record whose purge hits NotFound next time).
+        // Due on the wall clock and on the monotonic clock: a wall clock that jumped ahead, or
+        // that moved on while agentd was down, cannot purge anything on its own.
+        let min_uptime_end = self
+            .opened_at
+            .checked_add(Duration::from_millis(self.cfg.quarantine_min_uptime_ms));
         let due: Vec<QuarantineRecord> = self
             .quarantine_records()?
             .into_iter()
-            .filter(|r| now_ms >= r.purge_after_ms)
+            .filter(|r| {
+                let mono_due = self
+                    .quarantine_due
+                    .get(&tables::quarantine_key(r))
+                    .copied()
+                    .or(min_uptime_end);
+                now_ms >= r.purge_after_ms && mono_due.is_some_and(|t| now_inst >= t)
+            })
             .collect();
         let qroot = self.cfg.quarantine_dir();
         let mut purged = Vec::new();
@@ -1188,6 +1205,9 @@ impl MetaEngine {
                 for r in &purged {
                     q.remove(tables::quarantine_key(r).as_str())?;
                 }
+            }
+            for r in &purged {
+                self.quarantine_due.remove(&tables::quarantine_key(r));
             }
             tx.commit()?;
             report.quarantine_purged = purged.len();

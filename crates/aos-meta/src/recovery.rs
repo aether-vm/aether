@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use aos_types::{BootId, EpochId, FrameId, PersistProof};
 use redb::{Database, TableError};
@@ -299,6 +299,7 @@ impl MetaEngine {
 
         // R1
         let r1 = r1_epoch_boot_pins(&db, current_boot, clock.now_ms(), clock.now_instant())?;
+        let opened_at = clock.now_instant();
         let mut engine = MetaEngine {
             cfg,
             db,
@@ -309,6 +310,8 @@ impl MetaEngine {
             clock,
             world_leases: HashMap::new(),
             pin_leases: r1.pin_leases,
+            opened_at,
+            quarantine_due: HashMap::new(),
             _lock: lock,
         };
         let mut s = RecoverySummary {
@@ -539,6 +542,12 @@ impl MetaEngine {
             }
         }
         tx.commit()?;
+        let grace = Duration::from_millis(self.cfg.quarantine_grace_ms);
+        if let Some(due) = self.clock.now_instant().checked_add(grace) {
+            for r in &records {
+                self.quarantine_due.insert(tables::quarantine_key(r), due);
+            }
+        }
         let objects = self.cfg.objects_dir();
         for o in &orphans {
             let (from, to) = (objects.join(o), qdir.join(o));

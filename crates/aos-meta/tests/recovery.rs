@@ -400,3 +400,43 @@ fn gc_batches_bound_deletions_and_get_past_undeletable_objects() {
     assert_eq!(deleted, [2, 2], "4 of 5 frames, at most 2 at a time, then done");
     assert!(e.frame(frames[0]).unwrap().is_some());
 }
+
+/// The grace period also runs on the monotonic clock: a wall clock jumping ahead (NTP after a
+/// cold boot, a WSL2 resume) must not purge what this run quarantined.
+#[test]
+fn a_wall_clock_jump_does_not_cut_the_quarantine_grace_period() {
+    let h = Harness::new("r6-wall-jump");
+    let (e, _) = h.open(boot_a());
+    drop(e);
+    h.add_orphan("stray.tmp");
+    let (mut e, s) = h.open(boot_a());
+    assert_eq!(s.orphans_quarantined, 1);
+    let grace = e.config().quarantine_grace_ms;
+    h.clock.set_wall(T0 + 3 * grace);
+    assert_eq!(e.collect_garbage(h.clock.now_ms()).unwrap().quarantine_purged, 0);
+    assert_eq!(h.quarantine_entries().len(), 1);
+    h.clock.advance(grace);
+    assert_eq!(e.collect_garbage(h.clock.now_ms()).unwrap().quarantine_purged, 1);
+}
+
+/// Quarantine left by an earlier run, or by a release without GC, is only purged once this run
+/// has been up for `quarantine_min_uptime_ms`, however long ago its wall-clock deadline passed.
+#[test]
+fn quarantine_from_an_earlier_run_waits_for_the_minimum_uptime() {
+    let h = Harness::new("r6-min-uptime");
+    let (e, _) = h.open(boot_a());
+    drop(e);
+    h.add_orphan("stray.tmp");
+    let (e, s) = h.open(boot_a());
+    assert_eq!(s.orphans_quarantined, 1);
+    drop(e);
+    // Days of downtime.
+    h.clock.set_wall(T0 + 72 * HOUR);
+    let (mut e, _) = h.open(boot_a());
+    let min_uptime = e.config().quarantine_min_uptime_ms;
+    assert_eq!(min_uptime, HOUR);
+    h.clock.advance(min_uptime - 1);
+    assert_eq!(e.collect_garbage(h.clock.now_ms()).unwrap().quarantine_purged, 0);
+    h.clock.advance(1);
+    assert_eq!(e.collect_garbage(h.clock.now_ms()).unwrap().quarantine_purged, 1);
+}

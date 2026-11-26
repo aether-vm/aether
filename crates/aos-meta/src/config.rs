@@ -39,8 +39,13 @@ pub struct MetaConfig {
     /// R6 breaker: orphan limit for small pools (`objects/` population below
     /// `min_orphan_ratio_sample`), where a ratio is meaningless.
     pub max_small_pool_orphans: usize,
-    /// Grace period before quarantined orphans are purged.
+    /// Grace period before quarantined orphans are purged. It runs on the wall clock and, for
+    /// objects quarantined by this run, on the monotonic clock as well.
     pub quarantine_grace_ms: u64,
+    /// Least uptime of this run before it purges quarantine it did not create itself (left by
+    /// an earlier run, possibly days ago, or by a release without GC): the wall clock alone
+    /// cannot be trusted across a restart.
+    pub quarantine_min_uptime_ms: u64,
     /// How long destroyed / lost world tombstones stay queryable. Must be at least
     /// `idempotency_ttl_ms` so a replayed `create_world` / `destroy_world` finds its world.
     pub world_tombstone_ttl_ms: u64,
@@ -66,6 +71,7 @@ impl MetaConfig {
             min_orphan_ratio_sample: 20,
             max_small_pool_orphans: 2,
             quarantine_grace_ms: DAY_MS,
+            quarantine_min_uptime_ms: 60 * 60 * 1000,
             world_tombstone_ttl_ms: DAY_MS,
             idempotency_ttl_ms: DAY_MS,
             pin_flush_interval_ms: 60 * 1000,
