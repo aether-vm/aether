@@ -63,7 +63,7 @@ python3 -m venv ~/work/forkloom-vm/venv
 (cd sdk/python && ~/work/forkloom-vm/venv/bin/python scripts/gen_proto.py --check)
 (cd sdk/python && FORKLOOM_LIVE_E2E=1 ~/work/forkloom-vm/venv/bin/python -m pytest -q)
 # TypeScript SDK；需要 Linux 版 Node >= 20（WSL 下注意不要误用 Windows 的 npm）
-(cd sdk/typescript && npm install --no-package-lock && FORKLOOM_LIVE_E2E=1 npm test)
+(cd sdk/typescript && npm ci && FORKLOOM_LIVE_E2E=1 npm test)
 ```
 
 ### 5. 在新电脑上无缝唤醒分级特战队（IDE 无关）

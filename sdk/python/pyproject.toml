@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "forkloom-vm"
 version = "0.1.0a0"
 description = "Thin Python gRPC client for Forkloom stateful sandbox & VM forking runtime"
-readme = "../README.md"
+readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
