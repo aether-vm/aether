@@ -1452,18 +1452,11 @@ impl WorldService for AgentdService {
         let token = parse_fence(req.fencing_token)?;
         let idem = parse_idem(req.idempotency_key);
 
-        {
-            let meta = self.inner.meta.lock().unwrap();
-            Self::check_not_lost(&meta, wid, false)?;
-            // Validate owner + fencing token BEFORE tearing down sandbox (unless idempotent replay).
-            if idem.is_none() {
-                meta.check_world_mutation(wid, &req.owner, token)
-                    .map_err(map_meta_error)?;
-            }
-        }
-
+        // `destroy_world` checks owner and fence before anything is torn down, and returns the
+        // tombstone of a world that already ended, with or without a key.
         let rec = {
             let mut meta = self.inner.meta.lock().unwrap();
+            Self::check_not_lost(&meta, wid, false)?;
             meta.destroy_world(wid, &req.owner, token, idem.as_ref())
                 .map_err(map_meta_error)?
         };

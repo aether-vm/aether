@@ -1353,3 +1353,22 @@ async fn exec_timeout_above_one_hour_is_rejected() {
     }
 }
 
+/// Destroying a world that already ended returns its tombstone, with or without a key.
+#[tokio::test]
+async fn destroy_without_a_key_after_the_lease_expired_returns_the_tombstone() {
+    let env = TestEnv::new("destroy-reaped");
+    let svc = env.boot_service();
+    let base = import_base(&svc, "bob").await;
+    let w = running_world(&svc, &base, "cw").await;
+    env.clock.advance(61_000);
+    assert_eq!(svc.reap_expired_worlds().unwrap().len(), 1);
+    let rec = svc
+        .destroy_world(Request::new(destroy_req(&w, None)))
+        .await
+        .expect("tombstone")
+        .into_inner()
+        .world
+        .unwrap();
+    assert_eq!(rec.state, WorldStateKind::WorldStateDestroyed as i32);
+}
+
