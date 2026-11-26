@@ -393,7 +393,47 @@ fn create_world_key_outlives_its_ttl_while_the_world_is_running() {
         "a retry must not create a second world next to the running one"
     );
 
+    // Once the world has ended its key lasts another TTL, like a short-lived world's.
     e.expire_idle_world_leases(|_| false).unwrap();
+    h.clock.advance(ttl - 1);
+    e.collect_garbage(h.clock.now_ms()).unwrap();
+    assert_eq!(
+        e.create_world(&req, Some(&key)).unwrap().world_id,
+        w.world_id,
+        "a retry right after the end of a long-lived world must see that world"
+    );
+    h.clock.advance(1);
     e.collect_garbage(h.clock.now_ms()).unwrap();
     assert_ne!(e.create_world(&req, Some(&key)).unwrap().world_id, w.world_id);
+}
+
+/// A `destroy_world` key recorded after the world had already ended outlives the tombstone's
+/// own TTL; the tombstone stays as long as the key that replays to it.
+#[test]
+fn a_destroy_key_recorded_after_the_end_keeps_the_tombstone_it_replays() {
+    const HOUR: u64 = 3600 * 1000;
+    let (h, mut e, f) = setup("idem-late-destroy");
+    let w = e.create_world(&world_req(f, &[]), None).unwrap();
+    h.clock.advance(1_001);
+    assert_eq!(e.expire_idle_world_leases(|_| false).unwrap(), [w.world_id]);
+    let tombstone_ttl = e.config().world_tombstone_ttl_ms;
+    assert_eq!(tombstone_ttl, 24 * HOUR);
+
+    h.clock.advance(12 * HOUR);
+    let key = IdempotencyKey::new("alice", "destroy-late");
+    let first = e
+        .destroy_world(w.world_id, "alice", w.fencing_token, Some(&key))
+        .unwrap();
+    h.clock.advance(12 * HOUR);
+    e.collect_garbage(h.clock.now_ms()).unwrap();
+    assert_eq!(
+        e.destroy_world(w.world_id, "alice", w.fencing_token, Some(&key))
+            .expect("the key still replays"),
+        first
+    );
+
+    h.clock.advance(12 * HOUR);
+    let gc = e.collect_garbage(h.clock.now_ms()).unwrap();
+    assert_eq!((gc.idempotency_purged, gc.tombstones_purged), (1, 1));
+    assert!(e.world(w.world_id).unwrap().is_none());
 }

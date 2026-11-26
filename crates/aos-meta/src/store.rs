@@ -1,6 +1,6 @@
 //! `MetaEngine`: frame state machine (I1 ~ I4), timelines and garbage collection.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1213,33 +1213,42 @@ impl MetaEngine {
             report.quarantine_purged = purged.len();
         }
 
-        // 5. tombstones + 6. idempotency records.
+        // 5. idempotency records, then 6. tombstones: a tombstone stays while a kept key replays
+        //    to it.
         let tx = begin_write(&self.db)?;
         {
             let mut worlds = tx.open_table(WORLDS)?;
+            let mut idem_t = tx.open_table(IDEMPOTENCY)?;
+            let ttl = self.cfg.idempotency_ttl_ms;
+            let mut replayed_worlds = HashSet::new();
+            for (key, r) in tables::scan_json::<IdempotencyRecord, _>(&idem_t)? {
+                let mut expires_at = r.recorded_at_ms.saturating_add(ttl);
+                if let IdemResponse::World(id) = &r.response {
+                    // Forgetting the key of a running world would let a retry create a second
+                    // one; after the world ended the key lasts a TTL like a short-lived world's.
+                    match tables::load_world(&worlds, id)?.map(|w| w.state.ended_at_ms()) {
+                        Some(None) => expires_at = u64::MAX,
+                        Some(Some(end)) => expires_at = expires_at.max(end.saturating_add(ttl)),
+                        None => {}
+                    }
+                    if expires_at > now_ms {
+                        replayed_worlds.insert(*id);
+                    }
+                }
+                if expires_at <= now_ms {
+                    idem_t.remove(key.as_str())?;
+                    report.idempotency_purged += 1;
+                }
+            }
             for (key, w) in tables::scan_json::<WorldRecord, _>(&worlds)? {
-                if w.state
-                    .ended_at_ms()
-                    .is_some_and(|t| t.saturating_add(self.cfg.world_tombstone_ttl_ms) <= now_ms)
+                if !replayed_worlds.contains(&w.world_id)
+                    && w.state.ended_at_ms().is_some_and(|t| {
+                        t.saturating_add(self.cfg.world_tombstone_ttl_ms) <= now_ms
+                    })
                 {
                     worlds.remove(key.as_str())?;
                     report.tombstones_purged += 1;
                 }
-            }
-            let mut idem_t = tx.open_table(IDEMPOTENCY)?;
-            for (key, r) in tables::scan_json::<IdempotencyRecord, _>(&idem_t)? {
-                if r.recorded_at_ms.saturating_add(self.cfg.idempotency_ttl_ms) > now_ms {
-                    continue;
-                }
-                // Forgetting the key of a running world would let a retry create a second one.
-                if let IdemResponse::World(id) = &r.response
-                    && tables::load_world(&worlds, id)?
-                        .is_some_and(|w| w.state.ended_at_ms().is_none())
-                {
-                    continue;
-                }
-                idem_t.remove(key.as_str())?;
-                report.idempotency_purged += 1;
             }
         }
         tx.commit()?;

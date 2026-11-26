@@ -175,7 +175,7 @@ pub struct Ephemeral<T> { inner: T, boot_id: u128 }
 
 2. **分层幂等与崩溃显式未知契约**
    - **元数据操作**（导入、创建、提交帧、销毁）在 `redb` 单写者事务内原子记录 `RequestId`，为**真幂等**。
-   - `CreateWorld` 的重放返回原 World 的**当前**记录（`agentd` 重启后为 `Lost`）；沙箱启动失败时在同一事务内终结 World 并忘记该 `RequestId`，允许重试。`RequestId` 记录保留 24 小时；World 仍在运行时不清除。
+   - `CreateWorld` 的重放返回原 World 的**当前**记录（`agentd` 重启后为 `Lost`）；沙箱启动失败时在同一事务内终结 World 并忘记该 `RequestId`，允许重试。`RequestId` 记录保留 24 小时；指向 World 的记录在 World 运行期间及其结束后 24 小时内都不清除，墓碑也保留到最后一条指向它的记录清除之后。
    - **可写沙箱 `Exec`** 仅提供 **World 存活期内**的 `RequestId` 结果缓存与去重。
    - 跨 `agentd` 崩溃重启，对未决或历史 `Exec` **一律返回显式 `WorldLost` / `OutcomeUnknown`，严禁猜测性自动重放**；是否对账或从 `Durable Frame` 重建由客户端决定。
 
