@@ -581,6 +581,9 @@ fn r6_quarantines_a_sealed_subvolume_on_a_full_pool_and_keeps_it_sealed() {
     // the pool stands in for that, since Btrfs frees some space on the next commit). A restart
     // must still come up, without a ballast, so agentd can serve DeleteFrame and run GC; a new
     // pool that cannot hold its ballast is still refused.
+    // Whether R6 needed the ballast just now depends on what the last commit freed; make sure it
+    // is gone, as after an R6 that did.
+    store.release_ballast().unwrap();
     let too_big = 1024 * MIB;
     let reopened = TreeStore::open(TreeStoreConfig::new(pool.mnt()).with_ballast_bytes(too_big))
         .expect("a pool whose ballast R6 spent must still open");
@@ -591,4 +594,34 @@ fn r6_quarantines_a_sealed_subvolume_on_a_full_pool_and_keeps_it_sealed() {
         other => panic!("a new pool without room for its ballast: {:?}", other.err()),
     }
     let _ = fs::remove_dir_all(&fill_dir);
+}
+
+#[test]
+#[ignore = "requires root + live Linux Btrfs loop mount in Forkloom-Dev"]
+fn a_larger_ballast_that_does_not_fit_keeps_the_one_already_there() {
+    let pool = TempBtrfsPool::create("ballast-grow", 512, "noatime");
+    let (small, too_big) = (8 * MIB, 1024 * MIB);
+    let cfg = |ballast| TreeStoreConfig::new(pool.mnt()).with_ballast_bytes(ballast);
+    let store = TreeStore::open(cfg(small)).unwrap();
+
+    // Without frames the pool still counts as new, also when opening it is retried after the
+    // first attempt left its subdirectories behind.
+    for attempt in 0..2 {
+        match TreeStore::open(cfg(too_big)) {
+            Err(StoreError::NoSpace { .. }) => {}
+            other => panic!("attempt {attempt} on an empty pool: {:?}", other.err()),
+        }
+    }
+
+    store
+        .import_tar(
+            FrameId::random(),
+            Cursor::new(build_tar(|b| append_regular(b, "a.txt", b"a", 0o644))),
+            &TarImportOptions::default(),
+        )
+        .unwrap();
+    let reopened = TreeStore::open(cfg(too_big)).expect("a pool holding frames must open");
+    let ballast = reopened.ballast_status().unwrap();
+    assert!(ballast.present, "the smaller ballast must survive the failed attempts");
+    assert_eq!(ballast.actual_bytes, small);
 }

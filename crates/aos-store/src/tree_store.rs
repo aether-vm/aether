@@ -126,7 +126,11 @@ impl TreeStore {
         #[cfg(not(target_os = "linux"))]
         let btrfs_backed = false;
 
-        let new_pool = !cfg.pool_root.join(OBJECTS_DIR).exists();
+        // A pool holding nothing is new, also when an earlier open failed after creating the
+        // subdirectories. Unreadable counts as empty, which keeps the stricter rule.
+        let holds_data = [OBJECTS_DIR, WORLDS_DIR, QUARANTINE_DIR].iter().any(|sub| {
+            fs::read_dir(cfg.pool_root.join(sub)).is_ok_and(|mut d| d.next().is_some())
+        });
         for sub in [OBJECTS_DIR, WORLDS_DIR, QUARANTINE_DIR] {
             let dir = cfg.pool_root.join(sub);
             fs::create_dir_all(&dir).map_err(|e| {
@@ -154,9 +158,9 @@ impl TreeStore {
         match store.ensure_ballast() {
             // R6 spends the ballast to get past a full pool. Refusing to open until someone frees
             // space by hand would keep agentd from deleting frames and running GC, so open without
-            // it; `ballast_status` reports it missing and the next open tries again. A new pool
-            // must fit its ballast.
-            Err(StoreError::NoSpace { .. }) if !new_pool => {}
+            // it; `ballast_status` reports it missing or short and the next open tries again. A
+            // pool holding nothing must fit its ballast.
+            Err(StoreError::NoSpace { .. }) if holds_data => {}
             res => res?,
         }
 
@@ -254,6 +258,8 @@ impl TreeStore {
                 return Ok(());
             }
         }
+        // A smaller ballast that is already there is better than none: keep it if growing fails.
+        let existed = path.exists();
 
         let file = OpenOptions::new()
             .write(true)
@@ -266,7 +272,9 @@ impl TreeStore {
         {
             if let Err(e) = crate::btrfs::linux_impl::fallocate_ballast(&file, self.ballast_bytes) {
                 drop(file);
-                let _ = fs::remove_file(&path);
+                if !existed {
+                    let _ = fs::remove_file(&path);
+                }
                 return Err(StoreError::io_or_enospc(
                     format!("fallocate ballast {}", path.display()),
                     e,
@@ -277,7 +285,9 @@ impl TreeStore {
         {
             if let Err(e) = file.set_len(self.ballast_bytes) {
                 drop(file);
-                let _ = fs::remove_file(&path);
+                if !existed {
+                    let _ = fs::remove_file(&path);
+                }
                 return Err(StoreError::io_or_enospc(
                     format!("allocating ballast {}", path.display()),
                     e,
