@@ -124,7 +124,7 @@ python3 -m venv ~/work/forkloom-vm/venv
      - WSL2 Linux 实机接入 `agentd --backend production` 端到端测试全绿：Python 4 路 SWE-bench 并发冷分叉采样 + 隔离变更 + `Checkpoint` + 解冻继续执行 + `ExportPatch` 耗时 **`0.31s` [`AdvisoryWsl2`]**，TypeScript 实机全链路 E2E 耗时 **`0.30s` [`AdvisoryWsl2`]**，测试后验证 **`0` 残留进程、`0` Btrfs 挂载、`0` loop 设备、`0` 残留子 cgroup**。
 7. **`v0.1.1` 加固（R-001 ~ R-005，均经 `fsck` 主审与第二意见评审通过）**：
    - **沙箱**：每个 World 默认映射到独立的宿主 UID/GID 段，沙箱 root 不再是宿主 root；pool 目录收紧为 `0700`；World 级内存、进程数与 CPU 限额；Exec 的进程放入独立的 `exec` cgroup，Exec 结束时连同后代一并清理；seccomp 禁止工作负载修改 PID 1 的调度与资源限制，并禁用 keyring 系统调用；`aos-guest` 不可 dump，OOM 时优先杀工作负载。
-   - **控制面**：租约到期的 World 自动回收；`CreateWorld` 幂等键持久化；销毁 World 不再等待执行中的 Exec；支持后台常驻进程（detached Exec，`api_minor = 1`）；Exec 超时上限 1 小时；同一 World 的拆除串行执行。
+   - **控制面**：租约到期的 World 自动回收；`CreateWorld` 幂等键持久化；销毁 World 时直接结束执行中的 Exec，不再等它自行结束；支持后台常驻进程（detached Exec，`api_minor = 1`）；Exec 超时上限 1 小时；同一 World 的拆除串行执行。
    - **存储与恢复**：周期 GC（按批限额，删除失败计入预算）；R6 能隔离只读子卷（`v0.1.0` 做不到），隔离全程保持只读，池满时也能完成；隔离宽限期同时按墙钟与单调时钟计算；池满且压舱文件已用掉时仍可重启。
    - **SDK**：两个包均可安装，TS 依赖由 `package-lock.json` 锁定；实机测试不留残留。
 
