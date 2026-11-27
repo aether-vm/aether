@@ -35,6 +35,9 @@ DEFAULT_GUEST_AGENT = Path("/var/lib/forkloom/guest-image/out/aos-guest")
 
 
 def remove_cgroup_tree(root: Path) -> None:
+    # A test that failed mid-Checkpoint can leave a world frozen.
+    for d, _, _ in os.walk(root):
+        (Path(d) / "cgroup.freeze").write_bytes(b"0\n")
     (root / "cgroup.kill").write_bytes(b"1\n")
     for d, _, _ in os.walk(root, topdown=False):
         # Killed processes leave the cgroup asynchronously.

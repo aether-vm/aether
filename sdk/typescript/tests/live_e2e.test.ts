@@ -36,6 +36,14 @@ const GUEST_AGENT = "/var/lib/forkloom/guest-image/out/aos-guest";
 
 // cgroup directories also hold control files, so only descend into real subdirectories.
 function removeCgroupTree(dir: string): void {
+  // A test that failed mid-Checkpoint can leave a world frozen.
+  const thaw = (d: string): void => {
+    writeFileSync(join(d, "cgroup.freeze"), "0\n");
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      if (entry.isDirectory()) thaw(join(d, entry.name));
+    }
+  };
+  thaw(dir);
   writeFileSync(join(dir, "cgroup.kill"), "1\n");
   const remove = (d: string): void => {
     for (const entry of readdirSync(d, { withFileTypes: true })) {

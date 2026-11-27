@@ -147,6 +147,8 @@ findmnt -no FSTYPE -T /var/lib/forkloom/meta            # 期望 ext4 或 xfs
 sudo btrfs qgroup show /var/lib/forkloom/pool 2>&1 | head -n1   # 期望 "quotas not enabled" 类提示
 ```
 
+> **每台主机只运行一个 `agentd`**：每个 World 的宿主 UID/GID 段（从 `0x7000_0000` 起，每段 65536 个）由 `agentd` 在进程内分配。两个 `agentd` 会把同一段分给各自的 World，这些 World 之间就不再隔离。自定义的 `uid_map` / `gid_map` 也不要落在 `0x7000_0000..0x8000_0000` 内。
+
 > **全新 SSD 稳态预处理（Track B 必做，Track A1 推荐）**：对**不含数据**的新盘先 `sudo blkdiscard /dev/nvmeXn1`（**破坏性**）再分区，并在正式采集前对池区预写 / `fstrim`，避免"空盘虚高"。每次采集前的页缓存状态（`drop_caches` 冷 / 全热 / `WILLNEED` 预热）按 Phase 0 手册 F0-5 要求显式记录。
 
 ---

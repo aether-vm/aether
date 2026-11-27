@@ -1,6 +1,6 @@
 # Forkloom Thin SDKs (`Python` & `TypeScript`)
 
-Thin gRPC clients generated directly from `../../proto/forkloom/v1/runtime.proto`.
+Thin gRPC clients generated directly from `../proto/forkloom/v1/runtime.proto`.
 
 - **`python/` (`forkloom-vm`, `0.1.0a0`)**: Primary SDK for RL training loops, MCTS sampling, and SWE-bench evaluation pipelines.
 - **`typescript/` (`@forkloom-vm/sdk`, `0.1.0-alpha.0`)**: Primary SDK for Node.js CI orchestration and `forkloom-mcp`.

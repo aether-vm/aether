@@ -19,13 +19,20 @@ describe("package metadata", () => {
 
   it("builds before packing and leaves the test build out of the package", () => {
     assert.equal(pkg().scripts.prepack, "npm run build");
-    const out = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
-      cwd: fileURLToPath(root),
-      encoding: "utf8",
-    });
+    // Under `npm test`, run that same npm through node: plain `npm` is `npm.cmd` on Windows,
+    // which execFile cannot start.
+    const args = ["pack", "--dry-run", "--json", "--ignore-scripts"];
+    const opts = { cwd: fileURLToPath(root), encoding: "utf8" } as const;
+    const npmCli = process.env.npm_execpath;
+    const out = npmCli
+      ? execFileSync(process.execPath, [npmCli, ...args], opts)
+      : execFileSync("npm", args, opts);
     const [{ files }] = JSON.parse(out) as [{ files: { path: string }[] }];
     const paths = files.map((f) => f.path);
-    assert.ok(paths.includes("README.md"), paths.join(" "));
+    // `npm test` builds first, so the entry points must be in what it packs.
+    for (const want of ["README.md", "dist/index.js", "dist/index.d.ts", "proto/forkloom/v1/runtime.proto"]) {
+      assert.ok(paths.includes(want), `${want} missing from: ${paths.join(" ")}`);
+    }
     assert.deepEqual(paths.filter((p) => p.startsWith("dist/test-build/")), []);
   });
 

@@ -2,9 +2,10 @@
 
 from pathlib import Path
 
-import pytest
-
-tomllib = pytest.importorskip("tomllib")
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10; `tomli` comes with the `dev` extra there.
+    import tomli as tomllib
 
 PROJECT = Path(__file__).resolve().parents[1]
 

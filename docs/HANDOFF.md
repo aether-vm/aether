@@ -57,17 +57,18 @@ cd ~/work/forkloom-vm/forkloom
 cargo test --workspace --locked --no-fail-fast 2>&1 | tee /tmp/forkloom-test.log
 grep -c skipping /tmp/forkloom-test.log   # 必须为 0
 cargo test -p aos-store --test linux_btrfs_live --locked -- --ignored
-# Python SDK；桩代码由 grpcio-tools 1.85.3 生成，其他版本会使 --check 失败
+# Python SDK：安装 SDK 本身及 dev 依赖（其中固定 grpcio-tools 1.85.3，其他版本生成的桩代码会使 --check 失败）
 python3 -m venv ~/work/forkloom-vm/venv
-~/work/forkloom-vm/venv/bin/pip install grpcio-tools==1.85.3 'grpcio>=1.85.3' 'protobuf>=7.35.1,<8' pytest
+~/work/forkloom-vm/venv/bin/pip install -e "./sdk/python[dev]"
 (cd sdk/python && ~/work/forkloom-vm/venv/bin/python scripts/gen_proto.py --check)
 (cd sdk/python && FORKLOOM_LIVE_E2E=1 ~/work/forkloom-vm/venv/bin/python -m pytest -q)
-# TypeScript SDK；需要 Linux 版 Node >= 20（WSL 下注意不要误用 Windows 的 npm）
+# TypeScript SDK：需要 Linux 版 Node >= 20。Ubuntu 24.04 源里的 nodejs 是 18，需另装（如 nvm 或 NodeSource）；
+# WSL 下注意不要误用 Windows 的 npm。npm test 会先构建再测试
 (cd sdk/typescript && npm ci && FORKLOOM_LIVE_E2E=1 npm test)
 ```
 
 ### 5. 在新电脑上无缝唤醒分级特战队（IDE 无关）
-在原生 Linux / WSL2 环境直接打开 `~/work/forkloom-vm/forkloom`（支持 Antigravity Swarm / Antigravity IDE / Cursor / VS Code 等任意客户端）。根目录的 `AGENTS.md` 会自动注入五条工程红线与 7 角色异构分级编队（`fsck` [`gemini-4-carbon-high`] / `Forge` / `Arch-Zero` / `Mach` / `SDK` / `Scout` / `monitor`；专项短期工位 `store` 与 `gw` 已完成 Phase 1 历史使命并按纪律退役）。直接对主控会话说：
+在原生 Linux / WSL2 环境直接打开 `~/work/forkloom-vm/forkloom`（支持 Antigravity Swarm / Antigravity IDE / Cursor / VS Code 等任意客户端）。根目录的 `AGENTS.md` 会自动注入五条工程红线与 5 个角色（`fsck` 外部评审 / `Arch-Zero` / `Forge` / `Mach` / `Scout`；原 `SDK` 并入 `Mach`，`monitor` 已取消）。直接对主控会话说：
 > **“请阅读 `AGENTS.md` 和 `docs/HANDOFF.md`，按 `Arch-Zero` 总控身份接手项目，基于 `v0.1.0` 冷分叉封版基线启动 Phase 2（Firecracker 热分叉引擎 `v0.5`）。”**
 
 ---
@@ -131,7 +132,7 @@ python3 -m venv ~/work/forkloom-vm/venv
 2. **`crates/aos-sandbox` `FirecrackerDriver` 热分叉与 `Volatile`/`Durable` 双档记忆帧（`Forge` 负责）**：
    - 严格按 `Guest FreezeAndSync -> VMM Paused -> Snapshot Create -> Disk FICLONE -> fsync -> VMM Resume -> PostForkReseed (VMGenID + 熵重种 + SOCK_DESTROY)` 顺序实现微虚拟机热快照与 O(1) `MAP_PRIVATE` 内存共享恢复；
    - 在 AMD Zen 3 + Linux 6.18 宿主默认启用 `noxsaves` 或升级 Firecracker `v1.11+`（`KVM_GET_XSAVE2`）。
-3. **`agentd` / `aos-cli` / SDK 热分叉编排与池水位保护（`Mach` + `SDK` 负责）**：
+3. **`agentd` / `aos-cli` / SDK 热分叉编排与池水位保护（`Mach` 负责）**：
    - 在 `agentd` 接入 `FirecrackerDriver`（`--driver firecracker`）、`Volatile` `tmpfs` 配额水位监控与 `Durable` 异步晋升（Promotion）。
 4. **已登记的非阻塞 P2 演进项（Phase 2/3 收敛）**：
    - `aos-store`：`safe_tar` 在 `reject_dotgit=false` 时将常规文件/硬链接 `.git` 代理路径一并纳入整包大小写/Unicode-NFD 折叠冲突检查；`import_local_dir` 改为流式管道以限制超大本地工作区峰值 RSS。
@@ -139,4 +140,4 @@ python3 -m venv ~/work/forkloom-vm/venv
    - `sdk/typescript`：`live_e2e.test.ts` 在外部传入 `FORKLOOM_LIVE_SOCKET` 模式下使用独立临时目录初始化 `baseDir` 并显式关闭临时文件描述符。
 5. **Track B 裸金属基准补采（待租用 Stage 1 裸金属主机）**：在非嵌套裸金属 NVMe 主机补采 `F0-1/F0-2/F0-5/F0-6` 与 Phase 1/2 可外发权威延迟及 16 路克隆 `PSS` 基线。
 
-> **备忘**：`AGENTS.md` 已确立 7 角色分级模型编制（`fsck` 首选 `gemini-4-carbon-high` / `claude-opus-5-5-high` 把守 P0 门禁，常规研发与 SDK 采用 `Medium` / `Flash Medium`，专项工位 `store` 与 `gw` 已按即审即退原则退役）。`ARCHITECTURE_V2.md` 第七节（v2.2 补强）与 `meta/forkloom.redb` 独立 `ext4/XFS` 分盘定论已在 Phase 1 `v0.1.0` 生产代码中 100% 落地验证。
+> **备忘**：按 `AGENTS.md` 现行编制，主会话（`Arch-Zero`）负责研发，`fsck` 由创始人在外部调用 Gemini 系模型评审（主审 `gemini-4-carbon-high`，第二意见 `gemini-4-neon-high`），写代码与评审的模型来自不同厂商。`ARCHITECTURE_V2.md` 第七节（v2.2 补强）与 `meta/forkloom.redb` 独立 `ext4/XFS` 分盘定论已在 Phase 1 `v0.1.0` 生产代码中 100% 落地验证。
