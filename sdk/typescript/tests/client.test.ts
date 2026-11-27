@@ -428,7 +428,7 @@ describe("@forkloom-vm/sdk", () => {
     const p = pinSpec("pin-1", "alice", 30_000);
     assert.equal(p.pinId, "pin-1");
     assert.equal(DEFAULT_SOCKET_PATH, "/run/forkloom/agentd.sock");
-    assert.equal(CLIENT_VERSION, "0.1.0-alpha.0");
+    assert.equal(CLIENT_VERSION, "0.1.1-alpha.0");
   });
 
   it("round-trips ErrorDetail binary proto3 codec losslessly", () => {

@@ -10,7 +10,7 @@ from typing import TypeAlias
 from ._proto.forkloom.v1 import runtime_pb2 as pb
 
 #: Package version lockstep-aligned with `agentd`.
-CLIENT_VERSION: str = "0.1.0a0"
+CLIENT_VERSION: str = "0.1.1a0"
 #: Required `forkloom.v1` API major version verified during `NegotiateVersion`.
 SUPPORTED_API_MAJOR: int = 1
 #: Default client identifier sent in `NegotiateVersionRequest.client_name`.

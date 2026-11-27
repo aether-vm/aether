@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "agentd"
-version = "0.1.0-alpha.0"
+version = "0.1.1-alpha.0"
 dependencies = [
  "anyhow",
  "aos-guest",
@@ -105,7 +105,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "aos-cli"
-version = "0.1.0-alpha.0"
+version = "0.1.1-alpha.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "aos-guest"
-version = "0.1.0-alpha.0"
+version = "0.1.1-alpha.0"
 dependencies = [
  "libc",
  "serde",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "aos-gw"
-version = "0.1.0-alpha.0"
+version = "0.1.1-alpha.0"
 dependencies = [
  "aho-corasick",
  "aos-types",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "aos-meta"
-version = "0.1.0-alpha.0"
+version = "0.1.1-alpha.0"
 dependencies = [
  "aos-types",
  "getrandom 0.3.4",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "aos-sandbox"
-version = "0.1.0-alpha.0"
+version = "0.1.1-alpha.0"
 dependencies = [
  "aos-guest",
  "aos-types",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "aos-store"
-version = "0.1.0-alpha.0"
+version = "0.1.1-alpha.0"
 dependencies = [
  "aos-meta",
  "aos-types",
@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "aos-types"
-version = "0.1.0-alpha.0"
+version = "0.1.1-alpha.0"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "phase0-harness"
-version = "0.1.0-alpha.0"
+version = "0.1.1-alpha.0"
 dependencies = [
  "anyhow",
  "aos-meta",

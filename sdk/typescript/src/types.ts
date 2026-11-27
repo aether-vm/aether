@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 /** Lockstep client version matching `agentd`. */
-export const CLIENT_VERSION = "0.1.0-alpha.0";
+export const CLIENT_VERSION = "0.1.1-alpha.0";
 /** Required `forkloom.v1` API major version verified during `NegotiateVersion`. */
 export const SUPPORTED_API_MAJOR = 1;
 /** Default client identifier sent in `NegotiateVersionRequest.clientName`. */

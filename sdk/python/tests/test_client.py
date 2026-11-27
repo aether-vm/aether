@@ -597,7 +597,7 @@ def test_all_17_rpcs_and_streaming(mock_server: tuple[str, MockState]) -> None:
     }
     assert expected_rpcs.issubset(set(state.recorded_calls))
     assert len(expected_rpcs) == 17
-    assert CLIENT_VERSION == "0.1.0a0"
+    assert CLIENT_VERSION == "0.1.1a0"
 
 
 def test_version_skew_and_mandatory_handshake(mock_server: tuple[str, MockState]) -> None:

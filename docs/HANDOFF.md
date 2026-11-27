@@ -1,6 +1,6 @@
 # 跨设备研发交接与进度基线（Handoff & Progress State）
 
-> **最新同步状态**：**Phase 1 Cold Fork MVP `v0.1.0` 已正式封版（Sealed & Tagged `v0.1.0`）！** 全仓 8 大核心 Rust crate（`aos-types`, `aos-store`, `aos-meta`, `aos-sandbox`, `aos-gw`, `aos-guest`, `agentd`, `aos-cli`）及 Python（`forkloom-vm` `0.1.0a0`）/ TypeScript（`@forkloom-vm/sdk` `0.1.0-alpha.0`）双语薄 gRPC-over-UDS SDK 已在 Windows 与原生 Linux / WSL2（`wsl -d Forkloom-Dev`，Ubuntu 24.04，Linux `6.18.58.1-WSL2`）完成全链路实机闭环验证，全部通过红队 `fsck` 终审门禁（**`0 P0 / 0 P1`**）。下一里程碑：**Phase 2 — Firecracker Live Hot-Fork Engine（`v0.5`）**。
+> **最新同步状态**：当前版本 **`v0.1.1`**（安全修复版；Rust crate `0.1.1-alpha.0`，Python `forkloom-vm` `0.1.1a0`，TypeScript `@forkloom-vm/sdk` `0.1.1-alpha.0`）。`v0.1.0` 发布后的加固评审查出了沙箱隔离与控制面的问题，其中包括 P0；`v0.1.1` 已全部修复（见第二节第 7 项），**请勿再使用 `v0.1.0`**。各批修复均经红队 `fsck` 外部评审通过后合入，并在原生 Linux / WSL2（`wsl -d Forkloom-Dev`，Ubuntu 24.04，Linux `6.18.58.1-WSL2`）完成实机验证。下一里程碑：**Phase 2 — Firecracker Live Hot-Fork Engine（`v0.5`）**。
 
 ---
 
@@ -69,7 +69,7 @@ python3 -m venv ~/work/forkloom-vm/venv
 
 ### 5. 在新电脑上无缝唤醒分级特战队（IDE 无关）
 在原生 Linux / WSL2 环境直接打开 `~/work/forkloom-vm/forkloom`（支持 Antigravity Swarm / Antigravity IDE / Cursor / VS Code 等任意客户端）。根目录的 `AGENTS.md` 会自动注入五条工程红线与 5 个角色（`fsck` 外部评审 / `Arch-Zero` / `Forge` / `Mach` / `Scout`；原 `SDK` 并入 `Mach`，`monitor` 已取消）。直接对主控会话说：
-> **“请阅读 `AGENTS.md` 和 `docs/HANDOFF.md`，按 `Arch-Zero` 总控身份接手项目，基于 `v0.1.0` 冷分叉封版基线启动 Phase 2（Firecracker 热分叉引擎 `v0.5`）。”**
+> **“请阅读 `AGENTS.md` 和 `docs/HANDOFF.md`，按 `Arch-Zero` 总控身份接手项目，基于 `v0.1.1` 冷分叉基线启动 Phase 2（Firecracker 热分叉引擎 `v0.5`）。”**
 
 ---
 
@@ -100,7 +100,7 @@ python3 -m venv ~/work/forkloom-vm/venv
      - **F0-5（512 MiB 恢复至 `aos-guest` 首条 `Exec /bin/uname -r` 返回）— `PASS`**：冷恢复 `mincore` 捕获 **14.2%** 工作集（`72.64 MiB`，4 extents）；Advisory 端到端 p50：`cold_cache` `90.8 ms`、`hot_cache` `42.9 ms`（对比纯 VMM API `2.32 ms`，印证铁律 2）、`mincore+WILLNEED` `83.4 ms`（含预热）/ `71.6 ms`（预热后）。
      - **F0-7（2 路并发隔离 `netns` 克隆唯一性与回环存活）— `PASS`**：`aos-guest` PID-1 自动拉起 `lo`（零手工 `ip link set lo up`），`FCVMGID:00` + `RNDADDENTROPY`/`RNDRESEEDCRNG` 产出 **2/2 唯一 64B `/dev/urandom`（251/512-bit 汉明距离）**，`NETLINK_SOCK_DIAG` `SOCK_DESTROY` 在 **`0.04 ms`** 内切断外部 TCP（`ECONNABORTED`）同时原 `127.0.0.1:18080` 回环连接池持续正常收发。
    - **[重要实机硬件发现 — AMD Zen 3 + Linux 6.18 KVM + Firecracker v1.10.1]**：在 AMD Ryzen 7 5800H（Zen 3）+ Linux 6.18 宿主内核上恢复 Firecracker `v1.10.1` 快照时，因 `KVM_GET_XSAVE` / `KVM_SET_XSAVE` 未覆盖完整 `XSAVES` 状态，Guest 执行 `XRSTORS` 会触发 `#GP`（`Bad FPU state detected at restore_fpregs_from_fpstate`）。**对策**：Guest `boot_args` 必须携带 **`noxsaves`**，或在 Phase 1/2 将 Firecracker 基线升级至 **`v1.11+ / v1.12+`（启用 `KVM_GET_XSAVE2`）**。
-6. **Phase 1 Cold Fork MVP（`v0.1.0`）全栈完成并通过 `fsck` Gate 终审（`0 P0 / 0 P1`）**：
+6. **Phase 1 Cold Fork MVP（`v0.1.0`）全栈完成并通过当时的 `fsck` Gate 终审（`0 P0 / 0 P1`）**；发布后的加固评审又查出问题，修复见第 7 项：
    - **`crates/aos-store`（Btrfs `TreeStore` + `openat2` + 零信任补丁导出，`#58 PASS`）**：
      - 编译期密封 `StorageKind`（`Tree` vs `Block`，`BlockImageHandle` 零宿主 `mount` API 并带 `compile_fail` doctest）；
      - Linux Btrfs 池护栏（拒绝 `/mnt/*`、`9p`、非 `BTRFS_SUPER_MAGIC`、`autodefrag` 及已启用 `qgroups`）与 `ballast` 预分配/池满 `ENOSPC` 自动释放重试；
@@ -122,6 +122,11 @@ python3 -m venv ~/work/forkloom-vm/venv
    - **`sdk/python` & `sdk/typescript`（双语薄 gRPC-over-UDS SDK 与并发冷分叉 E2E，`#78 / #91 PASS`）**：
      - Python `forkloom-vm`（`0.1.0a0`）与 TypeScript `@forkloom-vm/sdk`（`0.1.0-alpha.0`）完整覆盖 17 项 RPC、强制 `NegotiateVersion` 握手、自动规范化 `unix://` `:authority` 头及 20 类结构化异常解码；
      - WSL2 Linux 实机接入 `agentd --backend production` 端到端测试全绿：Python 4 路 SWE-bench 并发冷分叉采样 + 隔离变更 + `Checkpoint` + 解冻继续执行 + `ExportPatch` 耗时 **`0.31s` [`AdvisoryWsl2`]**，TypeScript 实机全链路 E2E 耗时 **`0.30s` [`AdvisoryWsl2`]**，测试后验证 **`0` 残留进程、`0` Btrfs 挂载、`0` loop 设备、`0` 残留子 cgroup**。
+7. **`v0.1.1` 加固（R-001 ~ R-005，均经 `fsck` 主审与第二意见评审通过）**：
+   - **沙箱**：每个 World 默认映射到独立的宿主 UID/GID 段，沙箱 root 不再是宿主 root；pool 目录收紧为 `0700`；World 级内存、进程数与 CPU 限额；Exec 的进程放入独立的 `exec` cgroup，Exec 结束时连同后代一并清理；seccomp 禁止工作负载修改 PID 1 的调度与资源限制，并禁用 keyring 系统调用；`aos-guest` 不可 dump，OOM 时优先杀工作负载。
+   - **控制面**：租约到期的 World 自动回收；`CreateWorld` 幂等键持久化；销毁 World 不再等待执行中的 Exec；支持后台常驻进程（detached Exec，`api_minor = 1`）；Exec 超时上限 1 小时；同一 World 的拆除串行执行。
+   - **存储与恢复**：周期 GC（按批限额，删除失败计入预算）；R6 能隔离只读子卷（`v0.1.0` 做不到），隔离全程保持只读，池满时也能完成；隔离宽限期同时按墙钟与单调时钟计算；池满且压舱文件已用掉时仍可重启。
+   - **SDK**：两个包均可安装，TS 依赖由 `package-lock.json` 锁定；实机测试不留残留。
 
 ---
 
@@ -137,7 +142,10 @@ python3 -m venv ~/work/forkloom-vm/venv
 4. **已登记的非阻塞 P2 演进项（Phase 2/3 收敛）**：
    - `aos-store`：`safe_tar` 在 `reject_dotgit=false` 时将常规文件/硬链接 `.git` 代理路径一并纳入整包大小写/Unicode-NFD 折叠冲突检查；`import_local_dir` 改为流式管道以限制超大本地工作区峰值 RSS。
    - `agentd` + `aos-gw`：Phase 3 启用强制加密审计时，在 `CreateWorld` 传播 `AuditStore::ensure_world` I/O 错误，并在启动恢复阶段自动清扫已 `Destroyed` 世界的残留 `.key` 槽位。
-   - `sdk/typescript`：`live_e2e.test.ts` 在外部传入 `FORKLOOM_LIVE_SOCKET` 模式下使用独立临时目录初始化 `baseDir` 并显式关闭临时文件描述符。
+   - `sdk/typescript`：`live_e2e.test.ts` 在外部传入 `FORKLOOM_LIVE_SOCKET` 模式下使用独立临时目录初始化 `baseDir` 并显式关闭临时文件描述符；`sync-proto` 在仓库之外跳过同步，使 `sdk/typescript` 可单独打包。
+   - `aos-sandbox`：启用 `CLONE_NEWCGROUP`；`aos-guest` 与工作负载分属不同 cgroup（`w-<id>/agent` 与 `workload`）。
+   - `agentd`：`CreateWorld` / `DestroyWorld` / `ExportPatch` 的同步 I/O 及并发拆除的等待移出 tokio 工作线程；接入 Firecracker 前让 `world_to_proto` 返回 World 实际的 `DriverKind`。
+   - `aos-meta` / `aos-store`：隔离宽限期跨重启保持单调计时；清理文件名非 UTF-8 或含 `\` 的隔离对象。
 5. **Track B 裸金属基准补采（待租用 Stage 1 裸金属主机）**：在非嵌套裸金属 NVMe 主机补采 `F0-1/F0-2/F0-5/F0-6` 与 Phase 1/2 可外发权威延迟及 16 路克隆 `PSS` 基线。
 
 > **备忘**：按 `AGENTS.md` 现行编制，主会话（`Arch-Zero`）负责研发，`fsck` 由创始人在外部调用 Gemini 系模型评审（主审 `gemini-4-carbon-high`，第二意见 `gemini-4-neon-high`），写代码与评审的模型来自不同厂商。`ARCHITECTURE_V2.md` 第七节（v2.2 补强）与 `meta/forkloom.redb` 独立 `ext4/XFS` 分盘定论已在 Phase 1 `v0.1.0` 生产代码中 100% 落地验证。
