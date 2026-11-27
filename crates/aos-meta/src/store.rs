@@ -1168,10 +1168,10 @@ impl MetaEngine {
                     q.remove(tables::quarantine_key(r).as_str())?;
                 }
             }
+            tx.commit()?;
             for r in &purged {
                 self.quarantine_due.remove(&tables::quarantine_key(r));
             }
-            tx.commit()?;
             report.quarantine_purged = purged.len();
         }
         Ok(report)
