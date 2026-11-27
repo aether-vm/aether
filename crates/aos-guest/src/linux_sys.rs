@@ -676,6 +676,12 @@ mod tests {
 
     #[test]
     fn a_workload_starts_under_an_inherited_oom_floor_above_500() {
+        // Only a writer with CAP_SYS_RESOURCE sets the floor.
+        // SAFETY: `geteuid` has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping oom floor test: needs root to set an oom_score_adj floor");
+            return;
+        }
         // The floor is real: without the privilege it was set with, 500 is refused.
         let mut lower = Command::new("/bin/sh");
         lower.args(["-c", "echo 500 > /proc/self/oom_score_adj"]);
