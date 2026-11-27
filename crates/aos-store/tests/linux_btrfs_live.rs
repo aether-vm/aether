@@ -576,5 +576,19 @@ fn r6_quarantines_a_sealed_subvolume_on_a_full_pool_and_keeps_it_sealed() {
     assert!(!orphan.path().exists(), "moved out of objects/");
     assert!(ro(&to), "still sealed in quarantine");
     assert_eq!(fs::read(to.join("blob-3.bin")).unwrap(), payload, "content unchanged");
+
+    // R6 spent the ballast and the pool may have no room to re-create it (a ballast larger than
+    // the pool stands in for that, since Btrfs frees some space on the next commit). A restart
+    // must still come up, without a ballast, so agentd can serve DeleteFrame and run GC; a new
+    // pool that cannot hold its ballast is still refused.
+    let too_big = 1024 * MIB;
+    let reopened = TreeStore::open(TreeStoreConfig::new(pool.mnt()).with_ballast_bytes(too_big))
+        .expect("a pool whose ballast R6 spent must still open");
+    assert!(!reopened.ballast_status().unwrap().present);
+    match TreeStore::open(TreeStoreConfig::new(pool.mnt().join("fresh")).with_ballast_bytes(too_big))
+    {
+        Err(StoreError::NoSpace { .. }) => {}
+        other => panic!("a new pool without room for its ballast: {:?}", other.err()),
+    }
     let _ = fs::remove_dir_all(&fill_dir);
 }

@@ -137,6 +137,12 @@ async fn main() -> Result<()> {
             store_cfg.allow_non_btrfs_for_testing = cli.allow_non_btrfs;
             let store = TreeStore::open(store_cfg)
                 .map_err(|e| anyhow!("TreeStore::open failed: {e}"))?;
+            if cli.ballast_mib > 0 && !store.ballast_status().is_ok_and(|b| b.present) {
+                eprintln!(
+                    "agentd: warning: pool is too full for its {} MiB ballast; running without it until the next start",
+                    cli.ballast_mib
+                );
+            }
             let hooks: Box<dyn RecoveryHooks> = Box::new(
                 ProductionRecoveryHooks::new(store.clone(), &cli.tmpfs_dir, &cli.cgroup_root)
                     .with_gateway_fence(gateway_fence.clone()),

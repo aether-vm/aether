@@ -126,6 +126,7 @@ impl TreeStore {
         #[cfg(not(target_os = "linux"))]
         let btrfs_backed = false;
 
+        let new_pool = !cfg.pool_root.join(OBJECTS_DIR).exists();
         for sub in [OBJECTS_DIR, WORLDS_DIR, QUARANTINE_DIR] {
             let dir = cfg.pool_root.join(sub);
             fs::create_dir_all(&dir).map_err(|e| {
@@ -150,8 +151,13 @@ impl TreeStore {
             btrfs_backed,
         };
 
-        if store.ballast_bytes > 0 {
-            store.ensure_ballast()?;
+        match store.ensure_ballast() {
+            // R6 spends the ballast to get past a full pool. Refusing to open until someone frees
+            // space by hand would keep agentd from deleting frames and running GC, so open without
+            // it; `ballast_status` reports it missing and the next open tries again. A new pool
+            // must fit its ballast.
+            Err(StoreError::NoSpace { .. }) if !new_pool => {}
+            res => res?,
         }
 
         Ok(store)
