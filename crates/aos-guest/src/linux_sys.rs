@@ -570,10 +570,13 @@ pub fn attach_child_to_cgroup_fd(cmd: &mut Command, procs_fd: RawFd) {
 const WORKLOAD_OOM_SCORE_ADJ: &[u8] = b"500\n";
 
 /// Attach a `pre_exec` hook raising the child's `oom_score_adj` to [`WORKLOAD_OOM_SCORE_ADJ`].
-/// Raising it needs no privilege; the child can lower it again, but only back to aos-guest's.
+/// Without `CAP_SYS_RESOURCE` the child cannot go below the floor (`oom_score_adj_min`) it
+/// inherits through aos-guest from whoever last set the score with that capability, e.g.
+/// systemd's `OOMScoreAdjust=`. A floor above 500 makes 500 fail with `EACCES`; the child then
+/// takes the maximum, 1000, which still ranks it above aos-guest.
 pub fn prefer_child_for_oom_kill(cmd: &mut Command) {
     // SAFETY: The closure runs between `fork` and `exec` and invokes only async-signal-safe
-    // syscalls (`open`, `write`, `close`) on a static path and payload.
+    // syscalls (`open`, `pwrite`, `close`) on a static path and payloads.
     unsafe {
         cmd.pre_exec(|| {
             let fd = libc::open(
@@ -583,7 +586,10 @@ pub fn prefer_child_for_oom_kill(cmd: &mut Command) {
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
-            let res = write_all_at_start(fd, WORKLOAD_OOM_SCORE_ADJ);
+            let mut res = write_all_at_start(fd, WORKLOAD_OOM_SCORE_ADJ);
+            if matches!(&res, Err(e) if e.raw_os_error() == Some(libc::EACCES)) {
+                res = write_all_at_start(fd, b"1000\n");
+            }
             libc::close(fd);
             res
         });
@@ -623,31 +629,66 @@ pub fn attach_child_to_cgroup(cmd: &mut Command, cgroup_procs_path: PathBuf) -> 
     })?;
 
     // SAFETY: The closure runs between `fork` and `exec` and invokes only async-signal-safe
-    // syscalls (`open`, `write`, `close`) with pre-allocated `c_path` and a static byte slice.
+    // syscalls (`open`, `pwrite`, `close`) with pre-allocated `c_path` and a static byte slice.
     unsafe {
         cmd.pre_exec(move || {
             let fd = libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
-            let payload = b"0\n";
-            let written = libc::write(fd, payload.as_ptr().cast::<libc::c_void>(), payload.len());
-            let write_err = if written < 0 {
-                Some(io::Error::last_os_error())
-            } else if written as usize != payload.len() {
-                Some(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "short write to cgroup.procs",
-                ))
-            } else {
-                None
-            };
+            let res = write_all_at_start(fd, b"0\n");
             libc::close(fd);
-            if let Some(err) = write_err {
-                return Err(err);
-            }
-            Ok(())
+            res
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Gives the child an `oom_score_adj` floor of 600, the way a privileged ancestor such as
+    /// systemd's `OOMScoreAdjust=600` does, then drops `CAP_SYS_RESOURCE` (a new user namespace
+    /// has no capabilities in the initial one) as aos-guest has.
+    fn with_oom_floor_600(cmd: &mut Command) {
+        // SAFETY: Runs between `fork` and `exec` and invokes only async-signal-safe syscalls on a
+        // static path and payload.
+        unsafe {
+            cmd.pre_exec(|| {
+                let fd = libc::open(
+                    c"/proc/self/oom_score_adj".as_ptr(),
+                    libc::O_WRONLY | libc::O_CLOEXEC,
+                );
+                if fd < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let res = write_all_at_start(fd, b"600\n");
+                libc::close(fd);
+                res?;
+                if libc::unshare(libc::CLONE_NEWUSER) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn a_workload_starts_under_an_inherited_oom_floor_above_500() {
+        // The floor is real: without the privilege it was set with, 500 is refused.
+        let mut lower = Command::new("/bin/sh");
+        lower.args(["-c", "echo 500 > /proc/self/oom_score_adj"]);
+        with_oom_floor_600(&mut lower);
+        assert!(!lower.status().expect("spawn sh").success(), "the floor must hold");
+
+        let mut cmd = Command::new("/bin/cat");
+        cmd.arg("/proc/self/oom_score_adj");
+        with_oom_floor_600(&mut cmd);
+        prefer_child_for_oom_kill(&mut cmd);
+        let out = cmd.output().expect("the workload must still start");
+        assert!(out.status.success());
+        let adj: i32 = String::from_utf8(out.stdout).unwrap().trim().parse().unwrap();
+        assert!(adj > 600, "the workload must still rank above aos-guest, got {adj}");
+    }
 }
