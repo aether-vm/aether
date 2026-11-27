@@ -504,5 +504,7 @@ fn live_linux_namespace_driver_hardening_and_cgroup_kill() {
         "expected InvalidConfig for symlinked rootfs/dev, got {sym_err:?}"
     );
 
+    // Fails harmlessly while another world of this epoch is still alive.
+    let _ = fs::remove_dir(world_cg.parent().unwrap());
     let _ = fs::remove_dir_all(&work);
 }

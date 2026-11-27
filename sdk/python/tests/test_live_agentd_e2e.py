@@ -34,6 +34,20 @@ DEFAULT_ROOTFS_STAGE = Path("/var/lib/forkloom/guest-image/rootfs-stage")
 DEFAULT_GUEST_AGENT = Path("/var/lib/forkloom/guest-image/out/aos-guest")
 
 
+def remove_cgroup_tree(root: Path) -> None:
+    (root / "cgroup.kill").write_bytes(b"1\n")
+    for d, _, _ in os.walk(root, topdown=False):
+        # Killed processes leave the cgroup asynchronously.
+        for attempt in range(101):
+            try:
+                os.rmdir(d)
+                break
+            except OSError:
+                if attempt == 100:
+                    raise
+                time.sleep(0.02)
+
+
 class LiveAgentdHarness:
     """Manages an isolated live `agentd --backend production` daemon on Linux/WSL2."""
 
@@ -157,26 +171,12 @@ class LiveAgentdHarness:
                 pass
 
         # Cleanup cgroups
+        cgroup_error: OSError | None = None
         if self.cgroup_root.exists():
             try:
-                for entry in os.scandir(self.cgroup_root):
-                    if entry.is_dir():
-                        p = Path(entry.path)
-                        try:
-                            (p / "cgroup.kill").write_bytes(b"1\n")
-                            (p / "cgroup.freeze").write_bytes(b"0\n")
-                            for sub in os.scandir(p):
-                                if sub.is_dir():
-                                    sp = Path(sub.path)
-                                    (sp / "cgroup.kill").write_bytes(b"1\n")
-                                    (sp / "cgroup.freeze").write_bytes(b"0\n")
-                                    os.rmdir(sp)
-                            os.rmdir(p)
-                        except OSError:
-                            pass
-                os.rmdir(self.cgroup_root)
-            except OSError:
-                pass
+                remove_cgroup_tree(self.cgroup_root)
+            except OSError as e:
+                cgroup_error = e
 
         # Unmount Btrfs loop
         if self.mounted:
@@ -198,6 +198,8 @@ class LiveAgentdHarness:
 
         if self.base_dir.exists():
             shutil.rmtree(self.base_dir, ignore_errors=True)
+        if cgroup_error is not None:
+            raise cgroup_error
 
 
 def make_clean_rootfs_tar(tmp_root: Path) -> bytes:

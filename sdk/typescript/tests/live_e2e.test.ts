@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import {
   closeSync,
   copyFileSync,
@@ -32,6 +33,26 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOTFS_STAGE = "/var/lib/forkloom/guest-image/rootfs-stage";
 const GUEST_AGENT = "/var/lib/forkloom/guest-image/out/aos-guest";
+
+// cgroup directories also hold control files, so only descend into real subdirectories.
+function removeCgroupTree(dir: string): void {
+  writeFileSync(join(dir, "cgroup.kill"), "1\n");
+  const remove = (d: string): void => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      if (entry.isDirectory()) remove(join(d, entry.name));
+    }
+    // Killed processes leave the cgroup asynchronously.
+    for (let i = 0; ; i += 1) {
+      try {
+        return rmdirSync(d);
+      } catch (e) {
+        if (i === 100) throw e;
+        execFileSync("sleep", ["0.02"]);
+      }
+    }
+  };
+  remove(dir);
+}
 
 const isLiveE2e = process.env.FORKLOOM_LIVE_E2E === "1";
 const isLinux = process.platform === "linux";
@@ -127,30 +148,22 @@ describe("TypeScript SDK Live agentd E2E", { skip: !isLiveE2e || !isLinux }, () 
     throw new Error(`agentd failed to bind 0600 socket at ${sockPath}`);
   });
 
-  after(() => {
+  after(async () => {
     if (daemonProc) {
-      daemonProc.kill();
+      if (daemonProc.exitCode === null && daemonProc.signalCode === null) {
+        const exited = once(daemonProc, "exit");
+        daemonProc.kill("SIGKILL");
+        await exited;
+      }
       daemonProc = undefined;
     }
+    let cgroupError: unknown;
     if (cgroupRoot && existsSync(cgroupRoot)) {
       try {
-        const entries = readdirSync(cgroupRoot);
-        for (const entry of entries) {
-          const p = join(cgroupRoot, entry);
-          try {
-            writeFileSync(join(p, "cgroup.kill"), "1\n");
-            writeFileSync(join(p, "cgroup.freeze"), "0\n");
-            for (const sub of readdirSync(p)) {
-              const sp = join(p, sub);
-              writeFileSync(join(sp, "cgroup.kill"), "1\n");
-              writeFileSync(join(sp, "cgroup.freeze"), "0\n");
-              rmdirSync(sp);
-            }
-            rmdirSync(p);
-          } catch {}
-        }
-        rmdirSync(cgroupRoot);
-      } catch {}
+        removeCgroupTree(cgroupRoot);
+      } catch (e) {
+        cgroupError = e;
+      }
     }
     if (mounted) {
       for (let i = 0; i < 10; i += 1) {
@@ -179,6 +192,7 @@ describe("TypeScript SDK Live agentd E2E", { skip: !isLiveE2e || !isLinux }, () 
         rmSync(baseDir, { recursive: true, force: true });
       } catch {}
     }
+    if (cgroupError) throw cgroupError;
   });
 
   it("completes full cold-fork lifecycle against production agentd", async () => {

@@ -19,6 +19,7 @@
   },
   "files": [
     "dist",
+    "!dist/test-build",
     "proto",
     "README.md"
   ],
@@ -29,6 +30,7 @@
     "sync-proto": "node scripts/sync-proto.mjs",
     "check-proto": "node scripts/sync-proto.mjs --check",
     "build": "npm run sync-proto && tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "npm run sync-proto && tsc -p tsconfig.test.json && node --test dist/test-build/tests/*.test.js"
   },
